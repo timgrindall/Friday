@@ -1,9 +1,12 @@
 """
 Friday - Voice and Text Assistant
-Named after the AI assistant in the Marvel Iron Man films
+Named after the character Friday from Robinson Crusoe
 
 Runs as a single program - no separate server/client needed.
 Just: python friday.py
+
+Dev mode (verbose logging + text input):
+    python friday.py -dev
 """
 
 import os
@@ -25,6 +28,10 @@ from dotenv import load_dotenv
 from flask import Flask, request, send_file, jsonify
 
 load_dotenv()
+
+# ── Dev mode ─────────────────────────────────────────────────────
+
+DEV_MODE = "-dev" in sys.argv
 
 # ── Configuration ────────────────────────────────────────────────
 
@@ -66,7 +73,8 @@ def load_history():
         try:
             with open(MEMORY_FILE) as f:
                 history = json.load(f)
-            print(f"[MEMORY] Loaded {len(history)} messages")
+            if DEV_MODE:
+                print(f"[MEMORY] Loaded {len(history)} messages")
             return history
         except Exception as e:
             print(f"[MEMORY] Failed to load: {e}")
@@ -90,7 +98,8 @@ def trim_history(history):
         history.pop(0)
         if history and history[0]["role"] == "assistant":
             history.pop(0)
-    print(f"[MEMORY] {len(history)} messages (~{estimate_tokens(history)} tokens)")
+    if DEV_MODE:
+        print(f"[MEMORY] {len(history)} messages (~{estimate_tokens(history)} tokens)")
     return history
 
 
@@ -110,7 +119,8 @@ def transcribe_audio(audio_bytes):
             f.write(audio_bytes)
         result = whisper_model.transcribe(AUDIO_INPUT)
         text = result["text"].strip()
-        print(f"[STT] {text}")
+        if DEV_MODE:
+            print(f"[STT] {text}")
         return text
     except Exception as e:
         print(f"[ERROR] Transcription failed: {e}")
@@ -126,10 +136,12 @@ def web_search(query):
         if "organic_results" in results:
             for r in results["organic_results"][:3]:
                 search_results.append({"title": r.get("title", ""), "snippet": r.get("snippet", "")})
-        print(f"[SEARCH] {len(search_results)} results")
+        if DEV_MODE:
+            print(f"[SEARCH] {len(search_results)} results")
         return search_results
     except Exception as e:
-        print(f"[ERROR] Search failed: {e}")
+        if DEV_MODE:
+            print(f"[ERROR] Search failed: {e}")
         return []
 
 
@@ -158,18 +170,21 @@ def generate_response(user_query, search_results, system_prompt):
 
         if response.status_code == 200:
             answer = response.json()["message"]["content"].strip()
-            print(f"[RESPONSE] {answer}")
+            if DEV_MODE:
+                print(f"[RESPONSE] {answer}")
             conversation_history.append({"role": "assistant", "content": answer})
             save_history(conversation_history)
             return answer
         else:
-            print(f"[ERROR] Ollama error: {response.status_code}")
+            if DEV_MODE:
+                print(f"[ERROR] Ollama error: {response.status_code}")
             return "I'm having trouble processing that."
 
     except requests.exceptions.ConnectionError:
         return "Ollama is not running. Please start it with: ollama serve"
     except Exception as e:
-        print(f"[ERROR] Response failed: {e}")
+        if DEV_MODE:
+            print(f"[ERROR] Response failed: {e}")
         return "I'm sorry, I had trouble processing that."
 
 
@@ -196,14 +211,17 @@ def tts_elevenlabs(text):
                 wf.setframerate(16000)
                 wf.writeframes(response.content)
             audio_bytes = wav_buffer.getvalue()
-            print(f"[TTS] ElevenLabs ({len(audio_bytes)} bytes)")
+            if DEV_MODE:
+                print(f"[TTS] ElevenLabs ({len(audio_bytes)} bytes)")
             return audio_bytes
         else:
-            print(f"[TTS] ElevenLabs error {response.status_code}, falling back")
+            if DEV_MODE:
+                print(f"[TTS] ElevenLabs error {response.status_code}, falling back")
             return tts_local(text)
 
     except Exception as e:
-        print(f"[ERROR] ElevenLabs failed: {e}, falling back")
+        if DEV_MODE:
+            print(f"[ERROR] ElevenLabs failed: {e}, falling back")
         return tts_local(text)
 
 
@@ -217,10 +235,12 @@ def tts_local(text):
         engine.runAndWait()
         with open(AUDIO_OUTPUT, "rb") as f:
             audio_bytes = f.read()
-        print(f"[TTS] Local ({len(audio_bytes)} bytes)")
+        if DEV_MODE:
+            print(f"[TTS] Local ({len(audio_bytes)} bytes)")
         return audio_bytes
     except Exception as e:
-        print(f"[ERROR] Local TTS failed: {e}")
+        if DEV_MODE:
+            print(f"[ERROR] Local TTS failed: {e}")
         return None
 
 
@@ -229,8 +249,9 @@ def tts_local(text):
 @app.route("/process", methods=["POST"])
 def process_voice():
     try:
-        print("\n" + "="*50)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Voice command...")
+        if DEV_MODE:
+            print("\n" + "="*50)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Voice command...")
         if "audio" not in request.files:
             return {"error": "No audio"}, 400
         audio_bytes = request.files["audio"].read()
@@ -238,7 +259,7 @@ def process_voice():
         if not user_query:
             return {"error": "Transcription failed"}, 500
         search_results = web_search(user_query) if SERPAPI_KEY else []
-        if not SERPAPI_KEY:
+        if DEV_MODE and not SERPAPI_KEY:
             print("[SEARCH] Skipped")
         response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_VOICE)
         response_audio = text_to_speech(response_text)
@@ -246,29 +267,33 @@ def process_voice():
             return send_file(BytesIO(response_audio), mimetype="audio/wav")
         return {"error": "TTS failed"}, 500
     except Exception as e:
-        print(f"[ERROR] {e}")
+        if DEV_MODE:
+            print(f"[ERROR] {e}")
         return {"error": str(e)}, 500
 
 
 @app.route("/process_text", methods=["POST"])
 def process_text():
     try:
-        print("\n" + "="*50)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query...")
+        if DEV_MODE:
+            print("\n" + "="*50)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query...")
         data = request.get_json()
         if not data or "text" not in data:
             return {"error": "No text"}, 400
         user_query = data["text"].strip()
         if not user_query:
             return {"error": "Empty query"}, 400
-        print(f"[TEXT] {user_query}")
+        if DEV_MODE:
+            print(f"[TEXT] {user_query}")
         search_results = web_search(user_query) if SERPAPI_KEY else []
-        if not SERPAPI_KEY:
+        if DEV_MODE and not SERPAPI_KEY:
             print("[SEARCH] Skipped")
         response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_TEXT)
         return jsonify({"response": response_text})
     except Exception as e:
-        print(f"[ERROR] {e}")
+        if DEV_MODE:
+            print(f"[ERROR] {e}")
         return {"error": str(e)}, 500
 
 
@@ -282,7 +307,8 @@ def clear_memory():
     global conversation_history
     conversation_history = []
     save_history(conversation_history)
-    print("[MEMORY] Cleared")
+    if DEV_MODE:
+        print("[MEMORY] Cleared")
     return jsonify({"status": "cleared"})
 
 
@@ -308,15 +334,17 @@ class Friday:
         print(f"Memory:  {MEMORY_FILE}")
         print(f"TTS:     {'ElevenLabs' if ELEVENLABS_KEY else 'pyttsx3 (local)'}")
         print(f"Search:  {'SerpAPI' if SERPAPI_KEY else 'Disabled'}")
+        if DEV_MODE:
+            print(f"Mode:    DEV (text input enabled)")
         print("\nPress Enter to activate.\n")
 
     def _print_active(self):
         print("\n" + "="*50)
         print("FRIDAY - ACTIVE")
         print("="*50)
-        print("\n  V + Enter  - Voice (hold SPACE to record)")
-        print("  T + Enter  - Text query")
-        print("  S + Enter  - Standby")
+        print("\n  Enter      - Voice (hold SPACE to record, release to send)")
+        if DEV_MODE:
+            print("  T + Enter  - Text query")
         print("  quit       - Exit\n")
 
     def _go_standby(self):
@@ -357,7 +385,8 @@ class Friday:
                 wf.setsampwidth(2)
                 wf.setframerate(self.RATE)
                 wf.writeframes(audio_data.tobytes())
-            print("[OK] Recording saved")
+            if DEV_MODE:
+                print("[OK] Recording saved")
             return self.INPUT_FILE
         except Exception as e:
             print(f"[ERROR] Recording failed: {e}")
@@ -373,7 +402,7 @@ class Friday:
                 pass
 
     def do_voice_session(self):
-        print("Hold SPACE to record, release to send. ESC for standby.\n")
+        print("Hold SPACE to record, release to send. ESC to cancel.\n")
         self.space_released.clear()
         cancelled = threading.Event()
 
@@ -397,7 +426,7 @@ class Friday:
 
         if cancelled.is_set():
             self._cancel_recording()
-            self._go_standby()
+            print("\nCancelled.\n")
             return
 
         wav_file = self.stop_recording()
@@ -406,7 +435,8 @@ class Friday:
 
     def _send_voice(self, wav_file):
         try:
-            print("[>>] Sending to Friday...")
+            if DEV_MODE:
+                print("[>>] Sending to Friday...")
             with open(wav_file, 'rb') as f:
                 response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=180)
             if response.status_code == 200:
@@ -420,31 +450,32 @@ class Friday:
         try:
             with open(self.OUTPUT_FILE, 'wb') as f:
                 f.write(audio_bytes)
-            print("[>>] Playing response...\n")
+            if DEV_MODE:
+                print("[>>] Playing response...\n")
             with wave.open(self.OUTPUT_FILE, 'rb') as wf:
                 audio_data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
                 sd.play(audio_data, samplerate=wf.getframerate())
                 sd.wait()
-            print("[OK] Done\n")
+            if DEV_MODE:
+                print("[OK] Done\n")
         except Exception as e:
             print(f"[ERROR] Playback failed: {e}\n")
 
-    # ── Text ──────────────────────────────────────────────────────
+    # ── Text (dev mode only) ──────────────────────────────────────
 
     def do_text_session(self):
-        print("Text mode. Blank line or ESC to standby.\n")
+        print("Text mode. Blank line to exit.\n")
         while True:
             print("> ", end="", flush=True)
             try:
                 text = input().strip()
             except EOFError:
-                self._go_standby()
                 return
-            if not text or "\x1b" in text:
-                self._go_standby()
+            if not text:
                 return
             try:
-                print("[>>] Sending to Friday...")
+                if DEV_MODE:
+                    print("[>>] Sending to Friday...")
                 response = requests.post(
                     f"{SERVER_URL}/process_text",
                     json={"text": text},
@@ -466,11 +497,6 @@ class Friday:
         while True:
             cmd = input().strip().lower()
 
-            if "\x1b" in cmd:
-                if self.active:
-                    self._go_standby()
-                continue
-
             if not self.active:
                 if cmd == "":
                     self.active = True
@@ -483,31 +509,25 @@ class Friday:
             if cmd == "quit":
                 print("Goodbye.")
                 sys.exit(0)
-            elif cmd in ("s", ""):
-                self._go_standby()
-            elif cmd == "v":
-                self.do_voice_session()
-            elif cmd == "t":
+            elif cmd == "t" and DEV_MODE:
                 self.do_text_session()
             else:
-                print("  V = voice  |  T = text  |  S/ESC = standby  |  quit = exit")
+                # Enter (empty string) or anything unrecognised → voice session
+                self.do_voice_session()
 
 
 # ── Entry Point ───────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Start Flask server in background thread
     server_thread = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=SERVER_PORT, debug=False, use_reloader=False),
         daemon=True
     )
     server_thread.start()
 
-    # Give server a moment to start
     import time
     time.sleep(2)
 
-    # Run client interface in main thread
     friday = Friday()
     try:
         friday.run()
