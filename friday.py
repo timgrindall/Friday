@@ -1,4 +1,4 @@
-# Version 6.0
+# Version 0.14
 
 """
 Friday - Voice and Text Assistant
@@ -25,6 +25,7 @@ import numpy as np
 import sounddevice as sd
 import whisper
 import requests
+from pynput import keyboard
 from dotenv import load_dotenv
 from flask import Flask, request, send_file, jsonify
 
@@ -164,7 +165,7 @@ def generate_response(user_query, search_results, system_prompt):
                 "model": OLLAMA_MODEL,
                 "messages": [{"role": "system", "content": system_prompt}] + conversation_history,
                 "stream": False,
-                "options": {"num_predict": 160},
+                "options": {"num_predict": 300},
             },
             timeout=180
         )
@@ -342,7 +343,8 @@ class Friday:
         print("\n" + "="*50)
         print("FRIDAY - ACTIVE")
         print("="*50)
-        print("\n  Enter      - Voice (SPACE to start, SPACE to send)")
+        voice_hint = "hold SPACE to record, release to send" if sys.platform == 'win32' else "Enter to start, Enter to send"
+        print(f"\n  Enter      - Voice ({voice_hint})")
         if DEV_MODE:
             print("  T + Enter  - Text query")
         print("  quit       - Exit\n")
@@ -380,6 +382,9 @@ class Friday:
             if not self.audio_frames:
                 return None
             audio_data = np.concatenate(self.audio_frames, axis=0)
+            # Prepend 500ms of silence so Whisper doesn't mishear the first words
+            silence = np.zeros((int(self.RATE * 0.5), self.CHANNELS), dtype=np.int16)
+            audio_data = np.concatenate([silence, audio_data])
             with wave.open(self.INPUT_FILE, 'wb') as wf:
                 wf.setnchannels(self.CHANNELS)
                 wf.setsampwidth(2)
@@ -402,83 +407,56 @@ class Friday:
                 pass
 
     def do_voice_session(self):
-        print("SPACE to start recording, SPACE to send. ESC to cancel.\n")
         if sys.platform == 'win32':
-            self._voice_win()
+            self._voice_pynput()
         else:
-            self._voice_unix()
+            self._voice_enter()
 
-    def _voice_unix(self):
-        import tty, termios, os
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-
-            # First SPACE starts, second SPACE stops and sends
-            print("Press SPACE to start recording.\n")
-            while True:
-                ch = os.read(fd, 1)
-                if ch == b' ':
-                    self.start_recording()
-                    break
-                elif ch == b'\x1b':
-                    print("Cancelled.\n")
-                    return
-
-            print("Press SPACE to send.\n")
-            while True:
-                ch = os.read(fd, 1)
-                if ch == b' ':
-                    break
-                elif ch == b'\x1b':
-                    self._cancel_recording()
-                    print("Cancelled.\n")
-                    return
-
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
-        wav_file = self.stop_recording()
-        if wav_file:
-            threading.Thread(target=self._send_voice, args=(wav_file,), daemon=True).start()
-
-        wav_file = self.stop_recording()
-        if wav_file:
-            threading.Thread(target=self._send_voice, args=(wav_file,), daemon=True).start()
-
-    def _voice_win(self):
-        import msvcrt, time
+    def _voice_pynput(self):
         print("Hold SPACE to record, release to send. ESC to cancel.\n")
+        space_released = threading.Event()
+        cancelled = threading.Event()
 
-        while True:
-            if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch == ' ':
+        def on_press(key):
+            if key == keyboard.Key.space:
+                if not self.recording:
                     self.start_recording()
-                    break
-                elif ch == '\x1b':
-                    print("Cancelled.\n")
-                    return
-            time.sleep(0.01)
+            elif key == keyboard.Key.esc:
+                cancelled.set()
+                space_released.set()
+                return False
 
-        got_repeat = False
-        last_char = time.time()
-        while True:
-            if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch == '\x1b':
-                    self._cancel_recording()
-                    print("Cancelled.\n")
-                    return
-                if ch == ' ':
-                    got_repeat = True
-                    last_char = time.time()
-            timeout = 0.15 if got_repeat else 0.6
-            if time.time() - last_char > timeout:
-                break
-            time.sleep(0.01)
+        def on_release(key):
+            if key == keyboard.Key.space:
+                space_released.set()
+                return False
 
+        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+            space_released.wait()
+            listener.stop()
+
+        if cancelled.is_set():
+            self._cancel_recording()
+            print("Cancelled.\n")
+            return
+
+        wav_file = self.stop_recording()
+        if wav_file:
+            threading.Thread(target=self._send_voice, args=(wav_file,), daemon=True).start()
+
+    def _drain_stdin(self):
+        """Flush any buffered input (e.g. from holding Enter) before the next prompt."""
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+
+    def _voice_enter(self):
+        print("Press Enter to start recording.\n")
+        input()
+        self._drain_stdin()
+        self.start_recording()
+        print("Press Enter to send.\n")
+        input()
+        self._drain_stdin()
         wav_file = self.stop_recording()
         if wav_file:
             threading.Thread(target=self._send_voice, args=(wav_file,), daemon=True).start()
@@ -503,8 +481,12 @@ class Friday:
             if DEV_MODE:
                 print("[>>] Playing response...\n")
             with wave.open(self.OUTPUT_FILE, 'rb') as wf:
+                framerate = wf.getframerate()
                 audio_data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-                sd.play(audio_data, samplerate=wf.getframerate())
+                # Prepend 300ms of silence so the audio device is primed before speech starts
+                silence = np.zeros(int(framerate * 0.3), dtype=np.int16)
+                audio_data = np.concatenate([silence, audio_data])
+                sd.play(audio_data, samplerate=framerate)
                 sd.wait()
             if DEV_MODE:
                 print("[OK] Done\n")

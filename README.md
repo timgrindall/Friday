@@ -30,7 +30,7 @@ No cloud AI required. Everything runs locally using Whisper for speech-to-text a
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/friday
+git clone https://github.com/timgrindall/friday
 cd friday
 pip install -r requirements.txt
 ```

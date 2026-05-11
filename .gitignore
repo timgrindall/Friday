@@ -1,4 +1,5 @@
-/old
+old/
 .env
 friday_memory.json
 __pycache__/
+fridayEnv/
