@@ -1,4 +1,4 @@
-# Version 0.14
+# Version 0.20
 
 """
 Friday - Voice and Text Assistant
@@ -40,7 +40,7 @@ DEV_MODE = "-dev" in sys.argv
 OLLAMA_MODEL     = "mistral"
 OLLAMA_URL       = "http://localhost:11434"
 MEMORY_FILE      = "friday_memory.json"
-TOKEN_CAP        = 2000
+TOKEN_CAP        = 1200
 SERVER_PORT      = 5001
 SERVER_URL       = f"http://localhost:{SERVER_PORT}"
 
@@ -55,12 +55,14 @@ AUDIO_OUTPUT = os.path.join(TEMP_DIR, "friday_output.wav")
 SYSTEM_PROMPT_VOICE = (
     "You are Friday, a helpful voice assistant. "
     "Give clear, natural responses of 3-4 sentences suitable for speaking aloud. "
-    "Be conversational and informative."
+    "Be conversational and informative. "
+    "If you are not sure about something, say so rather than guessing."
 )
 
 SYSTEM_PROMPT_TEXT = (
     "You are Friday, a helpful assistant. "
-    "Give well-structured, clear, and informative responses of 3-4 sentences."
+    "Give well-structured, clear, and informative responses of 3-4 sentences. "
+    "If you are not sure about something, say so rather than guessing."
 )
 
 # ── Flask App ────────────────────────────────────────────────────
@@ -95,14 +97,17 @@ def estimate_tokens(history):
     return sum(len(m["content"]) for m in history) // 4
 
 
-def trim_history(history):
-    while estimate_tokens(history) > TOKEN_CAP and len(history) > 2:
-        history.pop(0)
-        if history and history[0]["role"] == "assistant":
-            history.pop(0)
+def trim_for_context(history):
+    """Return a trimmed copy of history that fits within TOKEN_CAP.
+    The original full history is never modified."""
+    context = list(history)
+    while estimate_tokens(context) > TOKEN_CAP and len(context) > 2:
+        context.pop(0)
+        if context and context[0]["role"] == "assistant":
+            context.pop(0)
     if DEV_MODE:
-        print(f"[MEMORY] {len(history)} messages (~{estimate_tokens(history)} tokens)")
-    return history
+        print(f"[MEMORY] {len(history)} messages in archive, {len(context)} sent to Ollama (~{estimate_tokens(context)} tokens)")
+    return context
 
 
 conversation_history = load_history()
@@ -129,7 +134,19 @@ def transcribe_audio(audio_bytes):
         return None
 
 
+def is_online():
+    try:
+        requests.get("https://1.1.1.1", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
 def web_search(query):
+    if not is_online():
+        if DEV_MODE:
+            print("[SEARCH] Offline, skipping")
+        return []
     try:
         params = {"q": query, "api_key": SERPAPI_KEY, "num": 5, "engine": "google"}
         response = requests.get("https://serpapi.com/search", params=params, timeout=5)
@@ -147,8 +164,39 @@ def web_search(query):
         return []
 
 
+META_PATTERNS = (
+    "last thing i asked",
+    "last thing i said",
+    "what did i ask",
+    "what was my last question",
+    "what did i last ask",
+    "previous question",
+    "last question",
+)
+
+def check_meta_question(query):
+    """If the user is asking about their own previous message, answer directly from history."""
+    q = query.lower()
+    if any(p in q for p in META_PATTERNS):
+        # Find the most recent user message before this one
+        user_messages = [m["content"] for m in conversation_history if m["role"] == "user"]
+        if len(user_messages) >= 2:
+            return f"Your last question was: \"{user_messages[-2]}\""
+        else:
+            return "I don't have any previous questions in memory."
+    return None
+
+
 def generate_response(user_query, search_results, system_prompt):
     global conversation_history
+
+    # Handle meta-questions about conversation history directly
+    meta_answer = check_meta_question(user_query)
+    if meta_answer:
+        conversation_history.append({"role": "user", "content": user_query})
+        conversation_history.append({"role": "assistant", "content": meta_answer})
+        save_history(conversation_history)
+        return meta_answer
 
     content = user_query
     if search_results:
@@ -156,18 +204,18 @@ def generate_response(user_query, search_results, system_prompt):
         content = f"{user_query}\n\nSearch results:\n{results_text}"
 
     conversation_history.append({"role": "user", "content": content})
-    conversation_history = trim_history(conversation_history)
+    context = trim_for_context(conversation_history)
 
     try:
         response = requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={
                 "model": OLLAMA_MODEL,
-                "messages": [{"role": "system", "content": system_prompt}] + conversation_history,
+                "messages": [{"role": "system", "content": system_prompt}] + context,
                 "stream": False,
-                "options": {"num_predict": 300},
+                "options": {"num_predict": 160},
             },
-            timeout=180
+            timeout=300
         )
 
         if response.status_code == 200:
@@ -191,7 +239,7 @@ def generate_response(user_query, search_results, system_prompt):
 
 
 def text_to_speech(text):
-    return tts_elevenlabs(text) if ELEVENLABS_KEY else tts_local(text)
+    return tts_elevenlabs(text) if ELEVENLABS_KEY and is_online() else tts_local(text)
 
 
 def tts_elevenlabs(text):
@@ -466,7 +514,7 @@ class Friday:
             if DEV_MODE:
                 print("[>>] Sending to Friday...")
             with open(wav_file, 'rb') as f:
-                response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=180)
+                response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=300)
             if response.status_code == 200:
                 self._play_audio(response.content)
         except Exception as e:
@@ -511,7 +559,7 @@ class Friday:
                 response = requests.post(
                     f"{SERVER_URL}/process_text",
                     json={"text": text},
-                    timeout=180
+                    timeout=300
                 )
                 if response.status_code == 200:
                     reply = response.json().get("response", "")
