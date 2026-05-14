@@ -1,4 +1,4 @@
-# Version 0.20
+# Version 0.38
 
 """
 Friday - Voice and Text Assistant
@@ -18,8 +18,15 @@ import wave
 import tempfile
 import threading
 import io
+import warnings
+import logging
 from datetime import datetime
 from io import BytesIO
+
+# Suppress noisy startup messages
+warnings.filterwarnings("ignore")
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 import numpy as np
 import sounddevice as sd
@@ -35,6 +42,9 @@ load_dotenv()
 
 DEV_MODE = "-dev" in sys.argv
 
+# TODO: Unify normal and dev mode into a single code path where DEV_MODE
+# only toggles verbosity and text input, rather than separate loop structures.
+
 # ── Configuration ────────────────────────────────────────────────
 
 OLLAMA_MODEL     = "mistral"
@@ -43,6 +53,9 @@ MEMORY_FILE      = "friday_memory.json"
 TOKEN_CAP        = 400
 SERVER_PORT      = 5001
 SERVER_URL       = f"http://localhost:{SERVER_PORT}"
+TEXT_HISTORY        = False  # Set to True to re-enable conversation history for text mode
+VOICE_HISTORY_TURNS = 1     # Number of previous exchanges to include in voice mode (0 = disabled)
+MAX_RESPONSE_TOKENS = 75    # Max tokens to generate per response (Ollama's num_predict)
 
 SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")
 ELEVENLABS_KEY     = os.getenv("ELEVENLABS_API_KEY", "")
@@ -54,7 +67,7 @@ AUDIO_OUTPUT = os.path.join(TEMP_DIR, "friday_output.wav")
 
 SYSTEM_PROMPT_VOICE = (
     "You are Friday, a helpful voice assistant. "
-    "Give clear, natural responses of 3-4 sentences suitable for speaking aloud. "
+    "Give clear, natural responses of 1-2 sentences suitable for speaking aloud. "
     "Be conversational and informative. "
     "If you are not sure about something, say so rather than guessing."
 )
@@ -115,9 +128,9 @@ conversation_history = load_history()
 
 # ── Core Pipeline ─────────────────────────────────────────────────
 
-print("[FRIDAY] Loading Whisper...")
+print("[FRIDAY] Loading Whisper...") if DEV_MODE else None
 whisper_model = whisper.load_model("base")
-print("[FRIDAY] Whisper ready")
+print("[FRIDAY] Whisper ready") if DEV_MODE else None
 
 
 def transcribe_audio(audio_bytes):
@@ -164,6 +177,19 @@ def web_search(query):
         return []
 
 
+SEARCH_TRIGGERS = (
+    "today", "current", "latest", "now", "weather", "news",
+    "price", "stock", "score", "who won", "what is happening",
+    "recent", "right now", "this week", "this year", "tomorrow",
+    "forecast", "standings", "results", "update", "happening"
+)
+
+def needs_search(query):
+    """Only search the web if the query suggests real-time information is needed."""
+    q = query.lower()
+    return any(trigger in q for trigger in SEARCH_TRIGGERS)
+
+
 META_PATTERNS = (
     "last thing i asked",
     "last thing i said",
@@ -187,7 +213,7 @@ def check_meta_question(query):
     return None
 
 
-def generate_response(user_query, search_results, system_prompt):
+def generate_response(user_query, search_results, system_prompt, use_history=True, max_turns=None):
     global conversation_history
 
     # Handle meta-questions about conversation history directly
@@ -204,7 +230,18 @@ def generate_response(user_query, search_results, system_prompt):
         content = f"{user_query}\n\nSearch results:\n{results_text}"
 
     conversation_history.append({"role": "user", "content": content})
-    context = trim_for_context(conversation_history)
+
+    if not use_history:
+        context = [{"role": "user", "content": content}]
+    elif max_turns is not None:
+        # Take the last N complete exchanges (2 messages each) plus the current message
+        tail = conversation_history[-(max_turns * 2 + 1):]
+        context = tail
+    else:
+        context = trim_for_context(conversation_history)
+
+    if DEV_MODE:
+        print(f"[MEMORY] {len(context)} message(s) sent to Ollama")
 
     try:
         response = requests.post(
@@ -213,7 +250,7 @@ def generate_response(user_query, search_results, system_prompt):
                 "model": OLLAMA_MODEL,
                 "messages": [{"role": "system", "content": system_prompt}] + context,
                 "stream": False,
-                "options": {"num_predict": 160},
+                "options": {"num_predict": MAX_RESPONSE_TOKENS},
             },
             timeout=300
         )
@@ -260,6 +297,8 @@ def tts_elevenlabs(text):
                 wf.setsampwidth(2)
                 wf.setframerate(16000)
                 wf.writeframes(response.content)
+                # Pad with 300ms of silence to prevent last syllable clipping
+                wf.writeframes(bytes(int(16000 * 0.3) * 2))
             audio_bytes = wav_buffer.getvalue()
             if DEV_MODE:
                 print(f"[TTS] ElevenLabs ({len(audio_bytes)} bytes)")
@@ -308,10 +347,10 @@ def process_voice():
         user_query = transcribe_audio(audio_bytes)
         if not user_query:
             return {"error": "Transcription failed"}, 500
-        search_results = web_search(user_query) if SERPAPI_KEY else []
-        if DEV_MODE and not SERPAPI_KEY:
-            print("[SEARCH] Skipped")
-        response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_VOICE)
+        search_results = web_search(user_query) if SERPAPI_KEY and needs_search(user_query) else []
+        if DEV_MODE:
+            print(f"[SEARCH] {'Triggered' if search_results else 'Skipped'}")
+        response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_VOICE, use_history=True, max_turns=VOICE_HISTORY_TURNS)
         response_audio = text_to_speech(response_text)
         if response_audio:
             return send_file(BytesIO(response_audio), mimetype="audio/wav")
@@ -336,10 +375,10 @@ def process_text():
             return {"error": "Empty query"}, 400
         if DEV_MODE:
             print(f"[TEXT] {user_query}")
-        search_results = web_search(user_query) if SERPAPI_KEY else []
-        if DEV_MODE and not SERPAPI_KEY:
-            print("[SEARCH] Skipped")
-        response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_TEXT)
+        search_results = web_search(user_query) if SERPAPI_KEY and needs_search(user_query) else []
+        if DEV_MODE:
+            print(f"[SEARCH] {'Triggered' if search_results else 'Skipped'}")
+        response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_TEXT, use_history=TEXT_HISTORY)
         return jsonify({"response": response_text})
     except Exception as e:
         if DEV_MODE:
@@ -369,6 +408,8 @@ class Friday:
         self.recording = False
         self.audio_frames = []
         self.active = False
+        self.running = False
+        self.playback_done = threading.Event()
 
         self.CHANNELS = 1
         self.RATE = 16000
@@ -461,6 +502,12 @@ class Friday:
             self._voice_enter()
 
     def _voice_pynput(self):
+        import time
+        import msvcrt
+        # Flush any buffered keypresses before starting the listener
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+        time.sleep(0.1)
         print("Hold SPACE to record, release to send. ESC to cancel.\n")
         space_released = threading.Event()
         cancelled = threading.Event()
@@ -511,8 +558,7 @@ class Friday:
 
     def _send_voice(self, wav_file):
         try:
-            if DEV_MODE:
-                print("[>>] Sending to Friday...")
+            print("\n[>>] Sending to Friday...")
             with open(wav_file, 'rb') as f:
                 response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=300)
             if response.status_code == 200:
@@ -522,6 +568,7 @@ class Friday:
 
     def _play_audio(self, audio_bytes):
         if not audio_bytes:
+            self.playback_done.set()
             return
         try:
             with open(self.OUTPUT_FILE, 'wb') as f:
@@ -540,6 +587,8 @@ class Friday:
                 print("[OK] Done\n")
         except Exception as e:
             print(f"[ERROR] Playback failed: {e}\n")
+        finally:
+            self.playback_done.set()
 
     # ── Text (dev mode only) ──────────────────────────────────────
 
@@ -572,27 +621,48 @@ class Friday:
 
     # ── Main Loop ─────────────────────────────────────────────────
 
+    def _normal_voice_loop(self):
+        """Continuous voice loop for normal mode — no Enter needed between sessions."""
+        while self.running:
+            self.playback_done.clear()
+            self.do_voice_session()
+            self.playback_done.wait()
+
     def run(self):
         self._print_banner()
+        # Flush any buffered keypresses before listening
+        if sys.platform == 'win32':
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
         while True:
             cmd = input().strip().lower()
-
-            if not self.active:
-                if cmd == "":
-                    self.active = True
-                    self._print_active()
-                elif cmd == "quit":
-                    print("Goodbye.")
-                    sys.exit(0)
-                continue
 
             if cmd == "quit":
                 print("Goodbye.")
                 sys.exit(0)
-            elif cmd == "t" and DEV_MODE:
+
+            if not self.active:
+                if cmd == "":
+                    self.active = True
+                    if DEV_MODE:
+                        self._print_active()
+                    else:
+                        self.running = True
+                        voice_thread = threading.Thread(target=self._normal_voice_loop, daemon=True)
+                        voice_thread.start()
+                        # Watch stdin for quit while voice loop runs
+                        while self.running:
+                            cmd = input().strip().lower()
+                            if cmd == "quit":
+                                self.running = False
+                                print("Goodbye.")
+                                sys.exit(0)
+                continue
+
+            if cmd == "t" and DEV_MODE:
                 self.do_text_session()
             else:
-                # Enter (empty string) or anything unrecognised → voice session
                 self.do_voice_session()
 
 
