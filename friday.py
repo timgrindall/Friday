@@ -40,7 +40,7 @@ DEV_MODE = "-dev" in sys.argv
 OLLAMA_MODEL     = "mistral"
 OLLAMA_URL       = "http://localhost:11434"
 MEMORY_FILE      = "friday_memory.json"
-TOKEN_CAP        = 1200
+TOKEN_CAP        = 400
 SERVER_PORT      = 5001
 SERVER_URL       = f"http://localhost:{SERVER_PORT}"
 
@@ -227,7 +227,7 @@ def generate_response(user_query, search_results, system_prompt):
             return answer
         else:
             if DEV_MODE:
-                print(f"[ERROR] Ollama error: {response.status_code}")
+                print(f"[ERROR] Ollama error: {response.status_code} — {response.text}")
             return "I'm having trouble processing that."
 
     except requests.exceptions.ConnectionError:
