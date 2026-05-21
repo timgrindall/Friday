@@ -1,4 +1,4 @@
-# Version 0.65
+# Version 0.68
 
 """
 Friday - Voice and Text Assistant
@@ -7,21 +7,12 @@ Named after the character Friday from Robinson Crusoe
 Runs as a single program - no separate server/client needed.
 Just: python friday.py
 
-Dev mode (verbose logging + text input):
-    python friday.py -dev
+Flags:
+    --dev        Verbose logging + text input + streaming responses
+    --local      Force local TTS (Piper/pyttsx3), skip ElevenLabs
+    --no-search  Disable web search even if SerpAPI key is present
+    --voice      Play audio response in text/dev mode (requires --dev)
 """
-
-# ── TODO ─────────────────────────────────────────────────────────
-# [x] Streaming responses in dev/text mode with mid-stream cutoff
-# [x] Piper TTS for higher quality local voice fallback
-# [x] Research Mistral 4 Small — ruled out, exceeds available RAM on low-end hardware
-# [x] Update README to reflect single-file architecture and new config vars
-# [x] Fix problem where ElevenLabs is used when there is no internet connection
-# [ ] Fix bug where Friday does not recognize keyboard input at first try when in text mode
-# [ ] Feature where you can add the flag -local to force local TTS (Piper or pyttsx3) even if ElevenLabs key is present
-# [ ] Feature where you can add the flag -no-search to disable web search functionality even if SerpAPI key is present
-# [ ] Feature where you can add the flag -voice to enable voice playback even in text mode (for fun, not practical)
-# ─────────────────────────────────────────────────────────────────
 
 import os
 import sys
@@ -67,9 +58,12 @@ class C:
     YELLOW  = "\033[93m"
     RESET   = "\033[0m"
 
-# ── Dev mode ─────────────────────────────────────────────────────
+# ── Flags ─────────────────────────────────────────────────────────
 
-DEV_MODE = "-dev" in sys.argv
+DEV_MODE   = "--dev"       in sys.argv  # Verbose logging + text input + streaming
+LOCAL_TTS  = "--local"     in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
+NO_SEARCH  = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
+VOICE_TEXT = "--voice"     in sys.argv  # Play audio response in text mode (dev fun)
 
 # ── Configuration ────────────────────────────────────────────────
 
@@ -241,7 +235,10 @@ def get_search_query(query, text_mode=False):
     """
     Returns the query string if a web search is needed, or None if not.
     Uses keyword matching only — fast and reliable.
+    Returns None immediately if -no-search flag is set.
     """
+    if NO_SEARCH:
+        return None
     q = query.lower()
     if any(trigger in q for trigger in SEARCH_TRIGGERS):
         if DEV_MODE:
@@ -341,8 +338,9 @@ def text_to_speech(text):
     1. ElevenLabs (best quality, requires API key + internet)
     2. Piper (good quality, fully local, no API key)
     3. pyttsx3 (basic quality, fully local, no setup)
+    Use -local flag to skip ElevenLabs and force local TTS.
     """
-    if ELEVENLABS_KEY and is_online():
+    if ELEVENLABS_KEY and is_online() and not LOCAL_TTS:
         return tts_elevenlabs(text)
     elif can_use_piper():
         return tts_piper(text)
@@ -646,16 +644,20 @@ class Friday:
         print("="*50 + f"{C.RESET}")
         print(f"Model:   {OLLAMA_MODEL}")
         print(f"Memory:  {MEMORY_FILE}")
-        if ELEVENLABS_KEY and is_online():
+        if ELEVENLABS_KEY and is_online() and not LOCAL_TTS:
             tts_status = "ElevenLabs"
         elif can_use_piper():
             tts_status = f"Piper ({PIPER_VOICE})"
         else:
             tts_status = "pyttsx3 (local)"
+        if LOCAL_TTS:
+            tts_status += " (-local)"
         print(f"TTS:     {tts_status}")
-        print(f"Search:  {'SerpAPI' if SERPAPI_KEY else 'Disabled'}")
-        if DEV_MODE:
-            print(f"Mode:    DEV (text input enabled)")
+        search_status = "Disabled (-no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
+        print(f"Search:  {search_status}")
+        flags = [f for f, v in [("dev", DEV_MODE), ("local", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
+        if flags:
+            print(f"Flags:   {', '.join('--' + f for f in flags)}")
         print("\nPress Enter to activate.\n")
 
     def _print_active(self):
@@ -880,18 +882,24 @@ class Friday:
                 print(f"[!!] Error: {e}")
 
     def _stream_text_response(self, text):
-        """Stream response tokens to terminal. Press Enter to cut off mid-stream."""
+        """Stream response tokens to terminal. Press Enter to cut off mid-stream.
+        If -voice flag is set, also plays the response as audio after streaming."""
         import time
         stop_event = threading.Event()
+        stream_done = threading.Event()
+        full_response = []
 
         def watch_for_enter():
-            input()
-            stop_event.set()
+            # Only consume input if the stream hasn't already finished
+            if not stream_done.wait(timeout=0.05):
+                input()
+                stop_event.set()
 
         watcher = threading.Thread(target=watch_for_enter, daemon=True)
         watcher.start()
 
         t_start = time.time()
+        stopped_early = False
         try:
             with requests.post(
                 f"{SERVER_URL}/process_text_stream",
@@ -908,9 +916,12 @@ class Friday:
                         response.close()
                         elapsed = time.time() - t_start
                         print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
+                        stopped_early = True
                         break
                     if chunk:
-                        print(chunk.decode("utf-8"), end="", flush=True)
+                        decoded = chunk.decode("utf-8")
+                        print(decoded, end="", flush=True)
+                        full_response.append(decoded)
                 else:
                     elapsed = time.time() - t_start
                     print(f"\n  {C.GREEN}✓ Done ({elapsed:.1f}s){C.RESET}\n")
@@ -918,6 +929,20 @@ class Friday:
             print(f"\n  {C.YELLOW}[stopped]{C.RESET}")
         except Exception as e:
             print(f"\n  {C.YELLOW}[!!] Stream error: {e}{C.RESET}")
+        finally:
+            # Signal watcher that stream is done so it doesn't consume the next input()
+            stream_done.set()
+
+        # --voice flag: play the response as audio after streaming
+        if VOICE_TEXT and full_response and not stopped_early:
+            response_text = "".join(full_response)
+            print(f"  {C.CYAN}⟳ Generating audio...{C.RESET}", flush=True)
+            audio_bytes = text_to_speech(response_text)
+            if audio_bytes:
+                t_voice_start = time.time()
+                threading.Thread(
+                    target=self._play_audio, args=(audio_bytes, t_voice_start), daemon=True
+                ).start()
 
     # ── Main Loop ─────────────────────────────────────────────────
 
