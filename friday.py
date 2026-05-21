@@ -9,10 +9,17 @@ Just: python friday.py
 
 Flags:
     --dev        Verbose logging + text input + streaming responses
-    --local      Force local TTS (Piper/pyttsx3), skip ElevenLabs
+    --offline-tts      Force local TTS (Piper/pyttsx3), skip ElevenLabs
     --no-search  Disable web search even if SerpAPI key is present
     --voice      Play audio response in text/dev mode (requires --dev)
 """
+
+# ── TODO ─────────────────────────────────────────────────────────
+# [ ] Research and test wake word / wake on voice feature
+# [ ] Text mode should always perform a web search; voice mode uses keyword triggers only
+# [ ] Integrate setup script into main file, add colors matching friday.py
+# [ ] change --offline-tts flag to --local-tts
+# ─────────────────────────────────────────────────────────────────
 
 import os
 import sys
@@ -61,7 +68,7 @@ class C:
 # ── Flags ─────────────────────────────────────────────────────────
 
 DEV_MODE   = "--dev"       in sys.argv  # Verbose logging + text input + streaming
-LOCAL_TTS  = "--local"     in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
+LOCAL_TTS  = "--offline-tts"     in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
 NO_SEARCH  = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 VOICE_TEXT = "--voice"     in sys.argv  # Play audio response in text mode (dev fun)
 
@@ -338,7 +345,7 @@ def text_to_speech(text):
     1. ElevenLabs (best quality, requires API key + internet)
     2. Piper (good quality, fully local, no API key)
     3. pyttsx3 (basic quality, fully local, no setup)
-    Use -local flag to skip ElevenLabs and force local TTS.
+    Use --offline-tts flag to skip ElevenLabs and force local TTS.
     """
     if ELEVENLABS_KEY and is_online() and not LOCAL_TTS:
         return tts_elevenlabs(text)
@@ -651,11 +658,11 @@ class Friday:
         else:
             tts_status = "pyttsx3 (local)"
         if LOCAL_TTS:
-            tts_status += " (-local)"
+            tts_status += " (--offline-tts)"
         print(f"TTS:     {tts_status}")
         search_status = "Disabled (-no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
         print(f"Search:  {search_status}")
-        flags = [f for f, v in [("dev", DEV_MODE), ("local", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
+        flags = [f for f, v in [("dev", DEV_MODE), ("offline-tts", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
         if flags:
             print(f"Flags:   {', '.join('--' + f for f in flags)}")
         print("\nPress Enter to activate.\n")
