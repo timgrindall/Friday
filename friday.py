@@ -1,4 +1,4 @@
-# Version 0.60
+# Version 0.64
 
 """
 Friday - Voice and Text Assistant
@@ -200,61 +200,38 @@ def web_search(query):
 
 
 SEARCH_TRIGGERS = (
-    "today", "current", "latest", "now", "weather", "news",
-    "price", "stock", "score", "who won", "what is happening",
-    "recent", "right now", "this week", "this year", "tomorrow",
-    "forecast", "standings", "results", "update", "happening"
+    # Time-sensitive language
+    "today", "current", "latest", "now", "recent", "right now",
+    "this week", "this month", "this year", "tomorrow", "yesterday",
+    "happening", "update", "news", "announce", "just",
+
+    # Data and results
+    "weather", "forecast", "price", "stock", "score", "standings",
+    "results", "who won", "election",
+
+    # People likely to have recent news
+    "elon musk", "trump", "biden", "obama", "putin", "zelensky",
+    "musk", "zuckerberg", "bezos", "cook", "altman",
+
+    # Companies and orgs with ongoing news
+    "spacex", "tesla", "openai", "anthropic", "google", "apple",
+    "microsoft", "meta", "amazon", "nasa", "fda", "fed ",
+
+    # Topics that change frequently
+    "mars mission", "ai model", "crypto", "bitcoin", "interest rate",
+    "inflation", "war", "conflict", "sanctions", "tariff",
 )
 
 def get_search_query(query, text_mode=False):
     """
-    Returns an optimised search query string if a web search is needed, or None if not.
-    Voice mode: keyword match only (fast).
-    Text mode: asks Mistral to decide AND generate the query in one call.
+    Returns the query string if a web search is needed, or None if not.
+    Uses keyword matching only — fast and reliable.
     """
     q = query.lower()
-
-    # Fast path: keyword match — use raw query for voice, let Mistral refine for text
     if any(trigger in q for trigger in SEARCH_TRIGGERS):
-        if not text_mode:
-            return query  # voice: just use the raw query
-        # Fall through to Mistral to get a better query
-
-    # Text mode only: ask Mistral to decide and generate a search query
-    if SERPAPI_KEY and text_mode:
-        try:
-            response = requests.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": (
-                                f'Does answering this question require current information from after 2023? '
-                                f'If YES, reply with only a concise web search query (no explanation, no quotes). '
-                                f'If NO, reply with only the word NO.\n\nQuestion: {query}'
-                            )
-                        }
-                    ],
-                    "stream": False,
-                    "options": {"num_predict": 20}
-                },
-                timeout=20
-            )
-            if response.status_code == 200:
-                answer = response.json()["message"]["content"].strip().strip("\"'")
-                if DEV_MODE:
-                    print(f"  Search query: {answer}")
-                if answer.upper() == "NO" or answer.upper().startswith("NO "):
-                    return None
-                return answer  # Mistral's optimised search query
-        except Exception:
-            if DEV_MODE:
-                status("Web search skipped (Ollama busy)")
-            # Fall back to raw query on failure
-            return query if any(trigger in q for trigger in SEARCH_TRIGGERS) else None
-
+        if DEV_MODE:
+            print(f"  Search triggered: {query}")
+        return query
     return None
 
 
@@ -420,7 +397,7 @@ def process_voice():
         user_query = transcribe_audio(audio_bytes)
         if not user_query:
             return {"error": "Transcription failed"}, 500
-        search_query = get_search_query(user_query, text_mode=False)
+        search_query = get_search_query(user_query)
         if search_query:
             status("Searching the web...")
             search_results = web_search(search_query)
@@ -450,7 +427,7 @@ def process_text():
         user_query = data["text"].strip()
         if not user_query:
             return {"error": "Empty query"}, 400
-        search_query = get_search_query(user_query, text_mode=True)
+        search_query = get_search_query(user_query)
         search_results = web_search(search_query) if search_query else []
         response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_TEXT, use_history=TEXT_HISTORY_TURNS > 0, max_turns=TEXT_HISTORY_TURNS if TEXT_HISTORY_TURNS > 0 else None)
         return jsonify({"response": response_text})
@@ -475,7 +452,7 @@ def process_text_stream():
             print("\n" + "="*50)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query (stream)...")
 
-        search_query = get_search_query(user_query, text_mode=True)
+        search_query = get_search_query(user_query)
         if search_query:
             status("Searching the web...")
             search_results = web_search(search_query)
