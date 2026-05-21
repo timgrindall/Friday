@@ -1,0 +1,37 @@
+==================================================
+FRIDAY - ACTIVE
+==================================================
+
+  Enter      - Voice (hold SPACE to record, release to send)
+  T + Enter  - Text query
+  quit       - Exit
+
+t
+Text mode. Blank line to exit.
+
+> Tell me what you know about ChatGPT
+
+==================================================
+[23:17:37] Text query (stream)...
+  Search triggered: Tell me what you know about ChatGPT
+
+  ⟳ Searching the web...
+[SEARCH] Offline, skipping
+
+  ⟳ Thinking...
+  5 message(s) sent to Ollama
+
+Friday:  ChatGPT is a model from OpenAI that uses machine learning to generate human-like text in response to user inputs. It is based on a variant of the Transformer model called GPT-3 (Generative Pretrained Transformer 3) and has been fine-tuned on a diverse range of internet texts to produce responses that are often coherent, informative, and engaging. ChatGPT can be used for a variety of tasks such as answering questions, writing essays, composing poetry, summarizing articles, and even carrying out simple conversations. However, it is important to note that while ChatGPT can generate human-like text, it does not have consciousness or emotions and its responses are based on patterns it has learned during training rather than personal experiences or beliefs.
+  ✓ Done (74.9s)
+
+> Tell me about the founders of OpenAI
+
+
+Hold SPACE to record, release to send. ESC to cancel.
+
+Cancelled.
+
+
+Hold SPACE to record, release to send. ESC to cancel.
+
+Cancelled.

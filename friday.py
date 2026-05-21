@@ -16,6 +16,8 @@ Dev mode (verbose logging + text input):
 # [x] Piper TTS for higher quality local voice fallback
 # [x] Research Mistral 4 Small — ruled out, exceeds available RAM on low-end hardware
 # [x] Update README to reflect single-file architecture and new config vars
+# [ ] Fix problem where ElevenLabs is used when there is no internet connection
+# [ ] Fix bug where Friday does not recognize keyboard input at first try when in text mode
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -184,7 +186,7 @@ def is_online():
 def web_search(query):
     if not is_online():
         if DEV_MODE:
-            print("[SEARCH] Offline, skipping")
+            print("Search offline, skipping")
         return []
     try:
         params = {"q": query, "api_key": SERPAPI_KEY, "num": 5, "engine": "google"}
