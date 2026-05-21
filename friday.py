@@ -1,4 +1,4 @@
-# Version 0.64
+# Version 0.65
 
 """
 Friday - Voice and Text Assistant
@@ -13,9 +13,9 @@ Dev mode (verbose logging + text input):
 
 # ── TODO ─────────────────────────────────────────────────────────
 # [x] Streaming responses in dev/text mode with mid-stream cutoff
-# [ ] Piper TTS for higher quality local voice fallback
+# [x] Piper TTS for higher quality local voice fallback
 # [x] Research Mistral 4 Small — ruled out, exceeds available RAM on low-end hardware
-# [ ] Update README to reflect single-file architecture and new config vars
+# [x] Update README to reflect single-file architecture and new config vars
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -82,6 +82,10 @@ MAX_TEXT_RESPONSE_TOKENS = 800   # Max tokens for text/streaming responses
 SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")
 ELEVENLABS_KEY     = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+
+# Piper TTS (higher quality than pyttsx3, fully local)
+# Models: https://github.com/rhasspy/piper/blob/master/VOICES.md
+PIPER_VOICE        = os.getenv("PIPER_VOICE", "en_US-lessac-medium")  # Free, clear, medium quality
 
 TEMP_DIR     = tempfile.gettempdir()
 AUDIO_INPUT  = os.path.join(TEMP_DIR, "friday_input.wav")
@@ -321,7 +325,27 @@ def generate_response(user_query, search_results, system_prompt, use_history=Tru
 
 
 def text_to_speech(text):
-    return tts_elevenlabs(text) if ELEVENLABS_KEY and is_online() else tts_local(text)
+    """
+    TTS priority chain:
+    1. ElevenLabs (best quality, requires API key + internet)
+    2. Piper (good quality, fully local, no API key)
+    3. pyttsx3 (basic quality, fully local, no setup)
+    """
+    if ELEVENLABS_KEY and is_online():
+        return tts_elevenlabs(text)
+    elif can_use_piper():
+        return tts_piper(text)
+    else:
+        return tts_local(text)
+
+
+def can_use_piper():
+    """Check if piper-tts is installed and available."""
+    try:
+        import piper
+        return True
+    except ImportError:
+        return False
 
 
 def tts_elevenlabs(text):
@@ -351,15 +375,75 @@ def tts_elevenlabs(text):
         else:
             if DEV_MODE:
                 print(f"[TTS] ElevenLabs error {response.status_code}, falling back")
-            return tts_local(text)
+            return tts_piper(text) if can_use_piper() else tts_local(text)
 
     except Exception as e:
         if DEV_MODE:
             print(f"[ERROR] ElevenLabs failed: {e}, falling back")
+        return tts_piper(text) if can_use_piper() else tts_local(text)
+
+
+def tts_piper(text):
+    """
+    High-quality local TTS using Piper.
+    Requires: pip install piper-tts
+    """
+    try:
+        from piper.voice import PiperVoice
+        import subprocess
+        
+        # Determine model file path
+        voice_dir = os.path.expanduser(f"~/.local/share/piper/voices")
+        model_file = os.path.join(voice_dir, f"{PIPER_VOICE}.onnx")
+        
+        # Check if model exists, if not try to download it
+        if not os.path.exists(model_file):
+            if DEV_MODE:
+                print(f"[TTS] Piper model not found at {model_file}, downloading...")
+            os.makedirs(voice_dir, exist_ok=True)
+            try:
+                # Use Piper's built-in download
+                subprocess.run(
+                    ["piper", "--voice", PIPER_VOICE, "--data-dir", voice_dir],
+                    input=b"test",
+                    capture_output=True,
+                    timeout=60
+                )
+            except Exception as dl_error:
+                if DEV_MODE:
+                    print(f"[TTS] Piper model download failed: {dl_error}")
+                return tts_local(text)
+        
+        # Load voice and synthesize
+        voice = PiperVoice.load(model_file, use_cuda=False)
+        wav_buffer = io.BytesIO()
+        
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(22050)  # Piper default sample rate
+            
+            # Synthesize audio
+            for audio_chunk in voice.synthesize(text):
+                wf.writeframes(audio_chunk.tobytes())
+        
+        audio_bytes = wav_buffer.getvalue()
+        if DEV_MODE:
+            print(f"[TTS] Piper ({PIPER_VOICE}, {len(audio_bytes)} bytes)")
+        return audio_bytes
+
+    except ImportError:
+        if DEV_MODE:
+            print(f"[TTS] Piper not installed, falling back to local TTS")
+        return tts_local(text)
+    except Exception as e:
+        if DEV_MODE:
+            print(f"[ERROR] Piper TTS failed: {e}, falling back to local TTS")
         return tts_local(text)
 
 
 def tts_local(text):
+    """Fallback: Basic TTS using pyttsx3 (no setup required)."""
     try:
         import pyttsx3
         engine = pyttsx3.init()
@@ -370,7 +454,7 @@ def tts_local(text):
         with open(AUDIO_OUTPUT, "rb") as f:
             audio_bytes = f.read()
         if DEV_MODE:
-            print(f"[TTS] Local ({len(audio_bytes)} bytes)")
+            print(f"[TTS] pyttsx3 ({len(audio_bytes)} bytes)")
         return audio_bytes
     except Exception as e:
         if DEV_MODE:

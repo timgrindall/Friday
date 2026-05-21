@@ -7,3 +7,4 @@ pynput
 numpy
 python-dotenv
 elevenlabs
+piper-tts

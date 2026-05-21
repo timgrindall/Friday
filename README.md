@@ -44,15 +44,18 @@ pip install -r requirements.txt
 Create a `.env` file in the project folder (optional — Friday works without any API keys):
 
 ```
-# For high-quality voice output
+# For high-quality voice output (optional)
 ELEVENLABS_API_KEY=sk_your_key_here
 ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
 
-# For real-time web search
+# For Piper voice selection (optional, default: en_US-lessac-medium)
+PIPER_VOICE=en_US-lessac-medium
+
+# For real-time web search (optional)
 SERPAPI_KEY=your_key_here
 ```
 
-Both are optional. Without them, Friday uses local TTS (pyttsx3) and relies on Mistral's training data for answers.
+All are optional. Without them, Friday uses local TTS (Piper if installed, otherwise pyttsx3) and relies on Mistral's training data for answers.
 
 ---
 
@@ -117,6 +120,51 @@ MAX_RESPONSE_TOKENS = 300  # Allows longer voice responses
 
 ---
 
+## Voice Output Quality Tiers
+
+Friday uses a **three-tier fallback system** for voice output:
+
+### 1. **ElevenLabs** (Best Quality)
+- Natural, expressive speech
+- Requires `ELEVENLABS_API_KEY` in `.env`
+- Requires internet connection
+- Commercial-grade quality
+
+### 2. **Piper** (Good Quality, Fully Local)
+- Natural-sounding speech, no API key needed
+- Fully offline — no internet required
+- Included in `requirements.txt`
+- First time use: Piper auto-downloads a ~50-100MB voice model
+- Available voices: See [Piper voices](https://github.com/rhasspy/piper/blob/master/VOICES.md)
+- Default: `en_US-lessac-medium` (clear, natural, medium speed)
+
+**Custom voice (optional):**
+
+Add to your `.env`:
+
+```
+PIPER_VOICE=en_US-libritts_r-medium
+```
+
+Other recommended voices:
+- `en_US-lessac-medium` (default, very clear)
+- `en_US-libritts_r-medium` (natural, warm)
+- `en_US-ryan-high` (bright, energetic)
+- `en_US-ljspeech-high` (classic, widely tested)
+
+### 3. **pyttsx3** (Basic Fallback)
+- Built-in, minimal setup
+- Lower audio quality
+- Fast, no downloads needed
+- Used if Piper is not installed
+
+**Friday automatically chooses:**
+1. ElevenLabs if API key is set and online
+2. Piper if installed (on first use, downloads voice model)
+3. pyttsx3 as ultimate fallback
+
+---
+
 ## Clearing Memory
 
 To wipe conversation history and start fresh:
@@ -143,7 +191,7 @@ curl -X POST http://localhost:5001/memory/clear
 |-----------|---------|-------|
 | Speech to Text | [Whisper](https://github.com/openai/whisper) | Runs locally |
 | LLM | [Ollama](https://ollama.ai) + Mistral 7B | Runs locally |
-| Text to Speech | [ElevenLabs](https://elevenlabs.io) or pyttsx3 | ElevenLabs optional, falls back to local |
+| Text to Speech | [ElevenLabs](https://elevenlabs.io) → [Piper](https://github.com/rhasspy/piper) → pyttsx3 | ElevenLabs (best), Piper (good local), pyttsx3 (basic fallback) |
 | Web Search | [SerpAPI](https://serpapi.com) | Optional, triggered by keywords |
 | Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io) | Cross-platform |
 | Server | [Flask](https://flask.palletsprojects.com) | Built-in, runs in background thread |
@@ -265,4 +313,4 @@ Friday uses a small language model intentionally, so it may feel limited at time
 
 ## Version
 
-**0.64** — Single-file architecture with integrated Flask server, dev mode with streaming responses, smart web search triggering, configurable conversation history.
+**0.65** — Added Piper TTS for higher-quality local voice output. Three-tier TTS system: ElevenLabs → Piper → pyttsx3. Auto-downloads voice models on first use. Updated README with new configuration variables and troubleshooting.
