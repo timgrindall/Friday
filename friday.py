@@ -16,8 +16,11 @@ Dev mode (verbose logging + text input):
 # [x] Piper TTS for higher quality local voice fallback
 # [x] Research Mistral 4 Small — ruled out, exceeds available RAM on low-end hardware
 # [x] Update README to reflect single-file architecture and new config vars
-# [ ] Fix problem where ElevenLabs is used when there is no internet connection
+# [x] Fix problem where ElevenLabs is used when there is no internet connection
 # [ ] Fix bug where Friday does not recognize keyboard input at first try when in text mode
+# [ ] Feature where you can add the flag -local to force local TTS (Piper or pyttsx3) even if ElevenLabs key is present
+# [ ] Feature where you can add the flag -no-search to disable web search functionality even if SerpAPI key is present
+# [ ] Feature where you can add the flag -voice to enable voice playback even in text mode (for fun, not practical)
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -226,6 +229,12 @@ SEARCH_TRIGGERS = (
     # Topics that change frequently
     "mars mission", "ai model", "crypto", "bitcoin", "interest rate",
     "inflation", "war", "conflict", "sanctions", "tariff",
+
+    # Custom search triggers for AI models
+    "Claude", "Gemini", "Llama", "Mistral", "Falcon", "Bard", "Ernie", "Gemini Pro",
+    "OpenAI", "Google AI", "Anthropic", "DeepMind", "AI Dungeon", "Character.AI",
+    "Openclaw", "Gemini Ultra", "Mistral 4 Small",
+
 )
 
 def get_search_query(query, text_mode=False):
@@ -637,7 +646,13 @@ class Friday:
         print("="*50 + f"{C.RESET}")
         print(f"Model:   {OLLAMA_MODEL}")
         print(f"Memory:  {MEMORY_FILE}")
-        print(f"TTS:     {'ElevenLabs' if ELEVENLABS_KEY else 'pyttsx3 (local)'}")
+        if ELEVENLABS_KEY and is_online():
+            tts_status = "ElevenLabs"
+        elif can_use_piper():
+            tts_status = f"Piper ({PIPER_VOICE})"
+        else:
+            tts_status = "pyttsx3 (local)"
+        print(f"TTS:     {tts_status}")
         print(f"Search:  {'SerpAPI' if SERPAPI_KEY else 'Disabled'}")
         if DEV_MODE:
             print(f"Mode:    DEV (text input enabled)")
