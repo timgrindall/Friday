@@ -1,4 +1,4 @@
-# Version 0.68
+# Version 0.71
 
 """
 Friday - Voice and Text Assistant
@@ -9,19 +9,19 @@ Just: python friday.py
 
 Flags:
     --dev        Verbose logging + text input + streaming responses
-    --offline-tts      Force local TTS (Piper/pyttsx3), skip ElevenLabs
+    --local-tts  Force local TTS (Piper/pyttsx3), skip ElevenLabs
     --no-search  Disable web search even if SerpAPI key is present
     --voice      Play audio response in text/dev mode (requires --dev)
+
+In text mode, press ESC while a response is streaming to cut it off early.
 """
 
 # ── TODO ─────────────────────────────────────────────────────────
-# [ ] Research wake word / wake on voice feature (research only!)
-# [ ] Fix Piper TTS: currently it sounds like pyttsx3 because the model isn't loading correctly. Need to implement the download flow and verify the model file is correct. Maybe add a --piper-voice flag to choose different voices?
-# [ ] Text mode should always perform a web search; voice mode uses keyword triggers only
-# [ ] Integrate setup script into main file, add colors matching friday.py
-# [ ] change --offline-tts flag to --local-tts
-# [ ] Update Readme after all changes are done, especially setup instructions for Piper and ElevenLabs. Note: We may want a shorter readme for a simple passion project like this.
-# [ ] Add a note in the readme that Mistral is the recomended model for best performance, and that smaller models may struggle to answer questions or maintain context
+# [ ] Research and test wake word / wake on voice feature
+# [ ] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
+# [x] Text mode should always perform a web search; voice mode uses keyword triggers only
+# [x] Integrate setup script into main file, add colors matching friday.py
+# [x] Rename --offline-tts flag to --local-tts
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -71,7 +71,7 @@ class C:
 # ── Flags ─────────────────────────────────────────────────────────
 
 DEV_MODE   = "--dev"       in sys.argv  # Verbose logging + text input + streaming
-LOCAL_TTS  = "--offline-tts"     in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
+LOCAL_TTS  = "--local-tts"     in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
 NO_SEARCH  = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 VOICE_TEXT = "--voice"     in sys.argv  # Play audio response in text mode (dev fun)
 
@@ -197,15 +197,18 @@ def web_search(query):
         return []
     try:
         params = {"q": query, "api_key": SERPAPI_KEY, "num": 5, "engine": "google"}
-        response = requests.get("https://serpapi.com/search", params=params, timeout=5)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=10)
         results = response.json()
         search_results = []
         if "organic_results" in results:
             for r in results["organic_results"][:3]:
                 search_results.append({"title": r.get("title", ""), "snippet": r.get("snippet", "")})
         if DEV_MODE:
-            print(f"[SEARCH] {len(search_results)} results")
+            print(f"  Search: {len(search_results)} results")
         return search_results
+    except requests.exceptions.Timeout:
+        print(f"  {C.YELLOW}! Search timed out, continuing without results{C.RESET}")
+        return []
     except Exception as e:
         if DEV_MODE:
             print(f"[ERROR] Search failed: {e}")
@@ -241,19 +244,57 @@ SEARCH_TRIGGERS = (
 
 )
 
+def first_sentence(text):
+    """Extract the first sentence from a query for cleaner search results."""
+    import re
+    match = re.split(r'(?<=[.!?])\s', text.strip(), maxsplit=1)
+    return match[0].strip() if match else text.strip()
+
+
+# Pronouns and vague references that signal the query depends on prior context
+CONTEXT_REFS = (
+    "those", "them", "they", "their", "it", "its", "that", "these",
+    "each of", "all of", "one of", "the same", "the above", "the following",
+    "previously", "mentioned", "listed", "said"
+)
+
+def resolve_search_query(query):
+    """
+    If the query contains vague references, prepend the last assistant topic
+    from conversation history so the search has enough context.
+    """
+    q = query.lower()
+    if any(ref in q for ref in CONTEXT_REFS):
+        # Find the last assistant message and extract its first sentence as context
+        prior = [m for m in conversation_history if m["role"] == "assistant"]
+        if prior:
+            last = first_sentence(prior[-1]["content"])
+            # Combine: "Give me descriptions for each of those ships" +
+            # "Here is a list of ten superyachts..." → better search
+            combined = f"{first_sentence(query)} {last}"
+            if DEV_MODE:
+                print(f"  Search context resolved: {combined[:80]}...")
+            return combined
+    return first_sentence(query)
+
+
 def get_search_query(query, text_mode=False):
     """
     Returns the query string if a web search is needed, or None if not.
-    Uses keyword matching only — fast and reliable.
-    Returns None immediately if -no-search flag is set.
+    Text mode always searches. Voice mode uses keyword triggers only.
+    Returns None immediately if --no-search flag is set.
+    Only the first sentence is sent to search, with context resolved for vague references.
     """
     if NO_SEARCH:
         return None
+    if text_mode:
+        return resolve_search_query(query)
     q = query.lower()
     if any(trigger in q for trigger in SEARCH_TRIGGERS):
+        search_query = resolve_search_query(query)
         if DEV_MODE:
-            print(f"  Search triggered: {query}")
-        return query
+            print(f"  Search triggered: {search_query}")
+        return search_query
     return None
 
 
@@ -319,7 +360,7 @@ def generate_response(user_query, search_results, system_prompt, use_history=Tru
                 "stream": False,
                 "options": {"num_predict": MAX_RESPONSE_TOKENS},
             },
-            timeout=300
+            timeout=600
         )
 
         if response.status_code == 200:
@@ -348,7 +389,7 @@ def text_to_speech(text):
     1. ElevenLabs (best quality, requires API key + internet)
     2. Piper (good quality, fully local, no API key)
     3. pyttsx3 (basic quality, fully local, no setup)
-    Use --offline-tts flag to skip ElevenLabs and force local TTS.
+    Use --local-tts flag to skip ElevenLabs and force local TTS.
     """
     if ELEVENLABS_KEY and is_online() and not LOCAL_TTS:
         return tts_elevenlabs(text)
@@ -530,7 +571,7 @@ def process_text():
         user_query = data["text"].strip()
         if not user_query:
             return {"error": "Empty query"}, 400
-        search_query = get_search_query(user_query)
+        search_query = get_search_query(user_query, text_mode=True)
         search_results = web_search(search_query) if search_query else []
         response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_TEXT, use_history=TEXT_HISTORY_TURNS > 0, max_turns=TEXT_HISTORY_TURNS if TEXT_HISTORY_TURNS > 0 else None)
         return jsonify({"response": response_text})
@@ -555,7 +596,7 @@ def process_text_stream():
             print("\n" + "="*50)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query (stream)...")
 
-        search_query = get_search_query(user_query)
+        search_query = get_search_query(user_query, text_mode=True)
         if search_query:
             status("Searching the web...")
             search_results = web_search(search_query)
@@ -590,7 +631,7 @@ def process_text_stream():
                         "options": {"num_predict": MAX_TEXT_RESPONSE_TOKENS},
                     },
                     stream=True,
-                    timeout=300
+                    timeout=600
                 ) as r:
                     for line in r.iter_lines():
                         if line:
@@ -601,11 +642,14 @@ def process_text_stream():
                                 yield token
                             if chunk.get("done"):
                                 break
+            except requests.exceptions.ConnectionError:
+                msg = "Ollama is not running. Please start it with: ollama serve"
+                yield msg
+                full_response.append(msg)
             except Exception as e:
                 if DEV_MODE:
                     print(f"[ERROR] Stream failed: {e}")
             finally:
-                # Save completed response to history
                 answer = "".join(full_response)
                 if answer:
                     conversation_history.append({"role": "assistant", "content": answer})
@@ -661,11 +705,11 @@ class Friday:
         else:
             tts_status = "pyttsx3 (local)"
         if LOCAL_TTS:
-            tts_status += " (--offline-tts)"
+            tts_status += " (--local-tts)"
         print(f"TTS:     {tts_status}")
         search_status = "Disabled (-no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
         print(f"Search:  {search_status}")
-        flags = [f for f, v in [("dev", DEV_MODE), ("offline-tts", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
+        flags = [f for f, v in [("dev", DEV_MODE), ("local-tts", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
         if flags:
             print(f"Flags:   {', '.join('--' + f for f in flags)}")
         print("\nPress Enter to activate.\n")
@@ -842,7 +886,7 @@ class Friday:
             print("\n[>>] Sending to Friday...")
             t_start = time.time()
             with open(wav_file, 'rb') as f:
-                response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=300)
+                response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=600)
             if response.status_code == 200:
                 elapsed = time.time() - t_start
                 print(f"  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
@@ -877,45 +921,81 @@ class Friday:
     # ── Text (dev mode only) ──────────────────────────────────────
 
     def do_text_session(self):
-        print("Text mode. Blank line to exit.\n")
+        print(f"Text mode. Blank line to exit. Press {C.YELLOW}ESC{C.RESET} to interrupt a response.\n")
         while True:
             print("> ", end="", flush=True)
             try:
                 text = input().strip()
-            except EOFError:
+            except (EOFError, KeyboardInterrupt):
+                print()
                 return
             if not text:
                 return
             try:
                 self._stream_text_response(text)
+            except KeyboardInterrupt:
+                print()
+                return
             except Exception as e:
                 print(f"[!!] Error: {e}")
 
     def _stream_text_response(self, text):
-        """Stream response tokens to terminal. Press Enter to cut off mid-stream.
-        If -voice flag is set, also plays the response as audio after streaming."""
+        """Stream response tokens to terminal. Press ESC to cut off mid-stream.
+        If --voice flag is set, also plays the response as audio after streaming."""
         import time
         stop_event = threading.Event()
         stream_done = threading.Event()
         full_response = []
 
-        def watch_for_enter():
-            # Only consume input if the stream hasn't already finished
-            if not stream_done.wait(timeout=0.05):
-                input()
+        def watch_for_esc():
+            # Only watch for ESC if the stream hasn't already finished
+            if stream_done.wait(timeout=0.05):
+                return
+            try:
+                if sys.platform == 'win32':
+                    import msvcrt
+                    while not stream_done.is_set():
+                        if msvcrt.kbhit():
+                            ch = msvcrt.getwch()
+                            if ch == '\x1b':  # ESC
+                                stop_event.set()
+                                return
+                else:
+                    from pynput import keyboard as kb
+                    def on_press(key):
+                        if key == kb.Key.esc:
+                            stop_event.set()
+                            return False
+                    with kb.Listener(on_press=on_press) as listener:
+                        stream_done.wait()
+                        listener.stop()
+            except (EOFError, KeyboardInterrupt):
                 stop_event.set()
 
-        watcher = threading.Thread(target=watch_for_enter, daemon=True)
+        watcher = threading.Thread(target=watch_for_esc, daemon=True)
         watcher.start()
 
         t_start = time.time()
         stopped_early = False
+        first_token_received = threading.Event()
+
+        def heartbeat():
+            """Print 'still thinking' every 60s until first token arrives."""
+            interval = 60
+            elapsed = 0
+            while not first_token_received.wait(timeout=interval):
+                elapsed += interval
+                print(f"\n  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}", flush=True)
+
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
+
         try:
             with requests.post(
                 f"{SERVER_URL}/process_text_stream",
                 json={"text": text},
                 stream=True,
-                timeout=300
+                timeout=600
             ) as response:
                 if response.status_code != 200:
                     print(f"[!!] Server error: {response.status_code}")
@@ -929,6 +1009,7 @@ class Friday:
                         stopped_early = True
                         break
                     if chunk:
+                        first_token_received.set()
                         decoded = chunk.decode("utf-8")
                         print(decoded, end="", flush=True)
                         full_response.append(decoded)
@@ -940,8 +1021,9 @@ class Friday:
         except Exception as e:
             print(f"\n  {C.YELLOW}[!!] Stream error: {e}{C.RESET}")
         finally:
-            # Signal watcher that stream is done so it doesn't consume the next input()
+            # Signal watcher and heartbeat that stream is done
             stream_done.set()
+            first_token_received.set()
 
         # --voice flag: play the response as audio after streaming
         if VOICE_TEXT and full_response and not stopped_early:
@@ -1017,6 +1099,18 @@ class Friday:
 # ── Entry Point ───────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # First-run check — nudge user to run setup if .env is missing
+    if not os.path.exists(".env"):
+        print(f"\n{C.YELLOW}  ! No .env file found.{C.RESET}")
+        print(f"  Looks like this might be your first time running Friday.")
+        print(f"  Run {C.GREEN}python setup.py{C.RESET} to install dependencies and configure API keys.")
+        print(f"\n  Friday will still run without it — API features will be disabled.\n")
+        try:
+            input("  Press Enter to continue anyway, or Ctrl+C to run setup first...\n")
+        except KeyboardInterrupt:
+            print("\n  Run: python setup.py")
+            sys.exit(0)
+
     server_thread = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=SERVER_PORT, debug=False, use_reloader=False),
         daemon=True
