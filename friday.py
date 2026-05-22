@@ -15,10 +15,13 @@ Flags:
 """
 
 # ── TODO ─────────────────────────────────────────────────────────
-# [ ] Research and test wake word / wake on voice feature
+# [ ] Research wake word / wake on voice feature (research only!)
+# [ ] Fix Piper TTS: currently it sounds like pyttsx3 because the model isn't loading correctly. Need to implement the download flow and verify the model file is correct. Maybe add a --piper-voice flag to choose different voices?
 # [ ] Text mode should always perform a web search; voice mode uses keyword triggers only
 # [ ] Integrate setup script into main file, add colors matching friday.py
 # [ ] change --offline-tts flag to --local-tts
+# [ ] Update Readme after all changes are done, especially setup instructions for Piper and ElevenLabs. Note: We may want a shorter readme for a simple passion project like this.
+# [ ] Add a note in the readme that Mistral is the recomended model for best performance, and that smaller models may struggle to answer questions or maintain context
 # ─────────────────────────────────────────────────────────────────
 
 import os
