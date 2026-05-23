@@ -19,6 +19,8 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # ── TODO ─────────────────────────────────────────────────────────
 # [ ] Research and test wake word / wake on voice feature
 # [ ] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
+# [ ] Note: I do not like the search context feature, way too unpredictable. lets get rid of it.
+# [ ] Fix the bug ...
 # [x] Text mode should always perform a web search; voice mode uses keyword triggers only
 # [x] Integrate setup script into main file, add colors matching friday.py
 # [x] Rename --offline-tts flag to --local-tts
@@ -885,8 +887,24 @@ class Friday:
             import time
             print("\n[>>] Sending to Friday...")
             t_start = time.time()
+            response_received = threading.Event()
+
+            def heartbeat():
+                interval = 60
+                elapsed = 0
+                while not response_received.wait(timeout=interval):
+                    elapsed += interval
+                    if elapsed == interval:
+                        print()
+                    print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
+                print(f"\r{' ' * 40}\r\n", end="", flush=True)
+
+            threading.Thread(target=heartbeat, daemon=True).start()
+
             with open(wav_file, 'rb') as f:
                 response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=600)
+            response_received.set()
+
             if response.status_code == 200:
                 elapsed = time.time() - t_start
                 print(f"  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
@@ -912,7 +930,8 @@ class Friday:
                 sd.play(audio_data, samplerate=framerate)
                 sd.wait()
             if t_start:
-                print(f"  {C.GREEN}✓ Playback complete ({time.time() - t_start:.1f}s total){C.RESET}\n")
+                print(f"  {C.GREEN}✓ Playback complete ({time.time() - t_start:.1f}s total){C.RESET}")
+                print(f"  Press Enter to record again.\n")
         except Exception as e:
             print(f"  {C.YELLOW}[ERROR] Playback failed: {e}{C.RESET}\n")
         finally:
@@ -980,12 +999,16 @@ class Friday:
         first_token_received = threading.Event()
 
         def heartbeat():
-            """Print 'still thinking' every 60s until first token arrives."""
+            """Print 'still thinking' every 60s until first token arrives, overwriting each time."""
             interval = 60
             elapsed = 0
             while not first_token_received.wait(timeout=interval):
                 elapsed += interval
-                print(f"\n  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}", flush=True)
+                if elapsed == interval:
+                    print()  # Empty line before first heartbeat
+                print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
+            # Clear the heartbeat line when done so Friday's response starts clean
+            print(f"\r{' ' * 40}\r\n", end="", flush=True)
 
         heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
         heartbeat_thread.start()
@@ -1015,7 +1038,7 @@ class Friday:
                         full_response.append(decoded)
                 else:
                     elapsed = time.time() - t_start
-                    print(f"\n  {C.GREEN}✓ Done ({elapsed:.1f}s){C.RESET}\n")
+                    print(f"\n\n  {C.GREEN}✓ Done ({elapsed:.1f}s){C.RESET}\n")
         except requests.exceptions.ChunkedEncodingError:
             print(f"\n  {C.YELLOW}[stopped]{C.RESET}")
         except Exception as e:
@@ -1071,6 +1094,7 @@ class Friday:
                     self.running = False
                     voice_thread.join(timeout=2)
                 self.do_text_session()
+                self._print_active()
                 self.running = True
 
     def run(self):
