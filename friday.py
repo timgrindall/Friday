@@ -1,4 +1,4 @@
-# Version 0.71
+# Version 1.0
 
 """
 Friday - Voice and Text Assistant
@@ -18,7 +18,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 
 # ── TODO ─────────────────────────────────────────────────────────
 # [ ] Research and test wake word / wake on voice feature
-# [ ] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
+# [x] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
 # [ ] Note: I do not like the search context feature, way too unpredictable. lets get rid of it.
 # [ ] Fix the bug ...
 # [x] Text mode should always perform a web search; voice mode uses keyword triggers only
@@ -36,11 +36,9 @@ import io
 import warnings
 import logging
 from datetime import datetime
-from io import BytesIO
 
 # Suppress noisy startup messages
 warnings.filterwarnings("ignore")
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 import numpy as np
@@ -49,7 +47,6 @@ import whisper
 import requests
 from pynput import keyboard
 from dotenv import load_dotenv
-from flask import Flask, request, send_file, jsonify, stream_with_context, Response
 
 load_dotenv()
 
@@ -73,7 +70,7 @@ class C:
 # ── Flags ─────────────────────────────────────────────────────────
 
 DEV_MODE   = "--dev"       in sys.argv  # Verbose logging + text input + streaming
-LOCAL_TTS  = "--local-tts"     in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
+LOCAL_TTS  = "--local-tts" in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
 NO_SEARCH  = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 VOICE_TEXT = "--voice"     in sys.argv  # Play audio response in text mode (dev fun)
 
@@ -83,8 +80,6 @@ OLLAMA_MODEL     = "mistral"
 OLLAMA_URL       = "http://localhost:11434"
 MEMORY_FILE      = "friday_memory.json"
 TOKEN_CAP        = 1000
-SERVER_PORT      = 5001
-SERVER_URL       = f"http://localhost:{SERVER_PORT}"
 TEXT_HISTORY_TURNS  = 2     # Number of previous exchanges to include in text mode (0 = disabled)
 VOICE_HISTORY_TURNS = 1     # Number of previous exchanges to include in voice mode (0 = disabled)
 MAX_RESPONSE_TOKENS      = 160   # Max tokens for voice responses (Ollama's num_predict)
@@ -114,10 +109,6 @@ SYSTEM_PROMPT_TEXT = (
     "Give well-structured, clear, and informative responses of 3-4 sentences. "
     "If you are not sure about something, say so rather than guessing."
 )
-
-# ── Flask App ────────────────────────────────────────────────────
-
-app = Flask(__name__)
 
 
 # ── Memory ───────────────────────────────────────────────────────
@@ -160,6 +151,15 @@ def trim_for_context(history):
     return context
 
 
+def clear_memory():
+    """Wipe conversation history from memory and disk."""
+    global conversation_history
+    conversation_history = []
+    save_history(conversation_history)
+    if DEV_MODE:
+        print("[MEMORY] Cleared")
+
+
 conversation_history = load_history()
 
 
@@ -170,11 +170,18 @@ whisper_model = whisper.load_model("base")
 print("[FRIDAY] Whisper ready") if DEV_MODE else None
 
 
-def transcribe_audio(audio_bytes):
+def check_ollama():
+    """Ping Ollama to confirm it's running before we start."""
     try:
-        with open(AUDIO_INPUT, "wb") as f:
-            f.write(audio_bytes)
-        result = whisper_model.transcribe(AUDIO_INPUT)
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def transcribe_audio(wav_path):
+    try:
+        result = whisper_model.transcribe(wav_path)
         text = result["text"].strip()
         if DEV_MODE:
             print(f"  Heard: {text}")
@@ -243,7 +250,6 @@ SEARCH_TRIGGERS = (
     "Claude", "Gemini", "Llama", "Mistral", "Falcon", "Bard", "Ernie", "Gemini Pro",
     "OpenAI", "Google AI", "Anthropic", "DeepMind", "AI Dungeon", "Character.AI",
     "Openclaw", "Gemini Ultra", "Mistral 4 Small",
-
 )
 
 def first_sentence(text):
@@ -267,12 +273,9 @@ def resolve_search_query(query):
     """
     q = query.lower()
     if any(ref in q for ref in CONTEXT_REFS):
-        # Find the last assistant message and extract its first sentence as context
         prior = [m for m in conversation_history if m["role"] == "assistant"]
         if prior:
             last = first_sentence(prior[-1]["content"])
-            # Combine: "Give me descriptions for each of those ships" +
-            # "Here is a list of ten superyachts..." → better search
             combined = f"{first_sentence(query)} {last}"
             if DEV_MODE:
                 print(f"  Search context resolved: {combined[:80]}...")
@@ -314,7 +317,6 @@ def check_meta_question(query):
     """If the user is asking about their own previous message, answer directly from history."""
     q = query.lower()
     if any(p in q for p in META_PATTERNS):
-        # Find the most recent user message before this one
         user_messages = [m["content"] for m in conversation_history if m["role"] == "user"]
         if len(user_messages) >= 2:
             return f"Your last question was: \"{user_messages[-2]}\""
@@ -326,7 +328,6 @@ def check_meta_question(query):
 def generate_response(user_query, search_results, system_prompt, use_history=True, max_turns=None):
     global conversation_history
 
-    # Handle meta-questions about conversation history directly
     meta_answer = check_meta_question(user_query)
     if meta_answer:
         conversation_history.append({"role": "user", "content": user_query})
@@ -344,7 +345,6 @@ def generate_response(user_query, search_results, system_prompt, use_history=Tru
     if not use_history:
         context = [{"role": "user", "content": content}]
     elif max_turns is not None:
-        # Take the last N complete exchanges (2 messages each) plus the current message
         tail = conversation_history[-(max_turns * 2 + 1):]
         context = tail
     else:
@@ -383,6 +383,64 @@ def generate_response(user_query, search_results, system_prompt, use_history=Tru
         if DEV_MODE:
             print(f"[ERROR] Response failed: {e}")
         return "I'm sorry, I had trouble processing that."
+
+
+def generate_response_stream(user_query, search_results):
+    """
+    Generator that yields response tokens directly from Ollama.
+    Handles history management and saving. Replaces the /process_text_stream route.
+    """
+    global conversation_history
+
+    content = user_query
+    if search_results:
+        results_text = "\n".join([f"- {r['title']}: {r['snippet']}" for r in search_results])
+        content = f"{user_query}\n\nSearch results:\n{results_text}"
+
+    conversation_history.append({"role": "user", "content": content})
+
+    if TEXT_HISTORY_TURNS > 0:
+        context = conversation_history[-(TEXT_HISTORY_TURNS * 2 + 1):]
+    else:
+        context = [{"role": "user", "content": content}]
+
+    if DEV_MODE:
+        print(f"  {len(context)} message(s) sent to Ollama")
+
+    full_response = []
+    try:
+        with requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [{"role": "system", "content": SYSTEM_PROMPT_TEXT}] + context,
+                "stream": True,
+                "options": {"num_predict": MAX_TEXT_RESPONSE_TOKENS},
+            },
+            stream=True,
+            timeout=600
+        ) as r:
+            for line in r.iter_lines():
+                if line:
+                    chunk = json.loads(line)
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        full_response.append(token)
+                        yield token
+                    if chunk.get("done"):
+                        break
+    except requests.exceptions.ConnectionError:
+        msg = "Ollama is not running. Please start it with: ollama serve"
+        yield msg
+        full_response.append(msg)
+    except Exception as e:
+        if DEV_MODE:
+            print(f"[ERROR] Stream failed: {e}")
+    finally:
+        answer = "".join(full_response)
+        if answer:
+            conversation_history.append({"role": "assistant", "content": answer})
+            save_history(conversation_history)
 
 
 def text_to_speech(text):
@@ -453,18 +511,15 @@ def tts_piper(text):
     try:
         from piper.voice import PiperVoice
         import subprocess
-        
-        # Determine model file path
-        voice_dir = os.path.expanduser(f"~/.local/share/piper/voices")
+
+        voice_dir = os.path.expanduser("~/.local/share/piper/voices")
         model_file = os.path.join(voice_dir, f"{PIPER_VOICE}.onnx")
-        
-        # Check if model exists, if not try to download it
+
         if not os.path.exists(model_file):
             if DEV_MODE:
                 print(f"[TTS] Piper model not found at {model_file}, downloading...")
             os.makedirs(voice_dir, exist_ok=True)
             try:
-                # Use Piper's built-in download
                 subprocess.run(
                     ["piper", "--voice", PIPER_VOICE, "--data-dir", voice_dir],
                     input=b"test",
@@ -475,20 +530,17 @@ def tts_piper(text):
                 if DEV_MODE:
                     print(f"[TTS] Piper model download failed: {dl_error}")
                 return tts_local(text)
-        
-        # Load voice and synthesize
+
         voice = PiperVoice.load(model_file, use_cuda=False)
         wav_buffer = io.BytesIO()
-        
+
         with wave.open(wav_buffer, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(22050)  # Piper default sample rate
-            
-            # Synthesize audio
             for audio_chunk in voice.synthesize(text):
                 wf.writeframes(audio_chunk.tobytes())
-        
+
         audio_bytes = wav_buffer.getvalue()
         if DEV_MODE:
             print(f"[TTS] Piper ({PIPER_VOICE}, {len(audio_bytes)} bytes)")
@@ -496,7 +548,7 @@ def tts_piper(text):
 
     except ImportError:
         if DEV_MODE:
-            print(f"[TTS] Piper not installed, falling back to local TTS")
+            print("[TTS] Piper not installed, falling back to local TTS")
         return tts_local(text)
     except Exception as e:
         if DEV_MODE:
@@ -524,159 +576,57 @@ def tts_local(text):
         return None
 
 
-# ── Flask Routes ──────────────────────────────────────────────────
+# ── Processing Functions (replaces Flask routes) ──────────────────
 
 def status(message):
-    """Print a status message to the terminal for both voice and text modes."""
+    """Print a cyan status message."""
     print(f"\n  {C.CYAN}⟳ {message}{C.RESET}", flush=True)
 
 
-@app.route("/process", methods=["POST"])
-def process_voice():
-    try:
-        if DEV_MODE:
-            print("\n" + "="*50)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Voice command...")
-        if "audio" not in request.files:
-            return {"error": "No audio"}, 400
-        audio_bytes = request.files["audio"].read()
-        user_query = transcribe_audio(audio_bytes)
-        if not user_query:
-            return {"error": "Transcription failed"}, 500
-        search_query = get_search_query(user_query)
-        if search_query:
-            status("Searching the web...")
-            search_results = web_search(search_query)
-        else:
-            search_results = []
-        status("Thinking...")
-        response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_VOICE, use_history=True, max_turns=VOICE_HISTORY_TURNS)
-        response_audio = text_to_speech(response_text)
-        if response_audio:
-            return send_file(BytesIO(response_audio), mimetype="audio/wav")
-        return {"error": "TTS failed"}, 500
-    except Exception as e:
-        if DEV_MODE:
-            print(f"[ERROR] {e}")
-        return {"error": str(e)}, 500
-
-
-@app.route("/process_text", methods=["POST"])
-def process_text():
-    try:
-        if DEV_MODE:
-            print("\n" + "="*50)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query...")
-        data = request.get_json()
-        if not data or "text" not in data:
-            return {"error": "No text"}, 400
-        user_query = data["text"].strip()
-        if not user_query:
-            return {"error": "Empty query"}, 400
-        search_query = get_search_query(user_query, text_mode=True)
-        search_results = web_search(search_query) if search_query else []
-        response_text = generate_response(user_query, search_results, SYSTEM_PROMPT_TEXT, use_history=TEXT_HISTORY_TURNS > 0, max_turns=TEXT_HISTORY_TURNS if TEXT_HISTORY_TURNS > 0 else None)
-        return jsonify({"response": response_text})
-    except Exception as e:
-        if DEV_MODE:
-            print(f"[ERROR] {e}")
-        return {"error": str(e)}, 500
-
-
-@app.route("/process_text_stream", methods=["POST"])
-def process_text_stream():
-    """Streaming text route — tokens arrive as they're generated."""
-    try:
-        data = request.get_json()
-        if not data or "text" not in data:
-            return {"error": "No text"}, 400
-        user_query = data["text"].strip()
-        if not user_query:
-            return {"error": "Empty query"}, 400
-
-        if DEV_MODE:
-            print("\n" + "="*50)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query (stream)...")
-
-        search_query = get_search_query(user_query, text_mode=True)
-        if search_query:
-            status("Searching the web...")
-            search_results = web_search(search_query)
-        else:
-            search_results = []
-        status("Thinking...")
-
-        # Build context same as generate_response
-        content = user_query
-        if search_results:
-            results_text = "\n".join([f"- {r['title']}: {r['snippet']}" for r in search_results])
-            content = f"{user_query}\n\nSearch results:\n{results_text}"
-
-        conversation_history.append({"role": "user", "content": content})
-        if TEXT_HISTORY_TURNS > 0:
-            context = conversation_history[-(TEXT_HISTORY_TURNS * 2 + 1):]
-        else:
-            context = [{"role": "user", "content": content}]
-
-        if DEV_MODE:
-            print(f"  {len(context)} message(s) sent to Ollama")
-
-        def generate():
-            full_response = []
-            try:
-                with requests.post(
-                    f"{OLLAMA_URL}/api/chat",
-                    json={
-                        "model": OLLAMA_MODEL,
-                        "messages": [{"role": "system", "content": SYSTEM_PROMPT_TEXT}] + context,
-                        "stream": True,
-                        "options": {"num_predict": MAX_TEXT_RESPONSE_TOKENS},
-                    },
-                    stream=True,
-                    timeout=600
-                ) as r:
-                    for line in r.iter_lines():
-                        if line:
-                            chunk = json.loads(line)
-                            token = chunk.get("message", {}).get("content", "")
-                            if token:
-                                full_response.append(token)
-                                yield token
-                            if chunk.get("done"):
-                                break
-            except requests.exceptions.ConnectionError:
-                msg = "Ollama is not running. Please start it with: ollama serve"
-                yield msg
-                full_response.append(msg)
-            except Exception as e:
-                if DEV_MODE:
-                    print(f"[ERROR] Stream failed: {e}")
-            finally:
-                answer = "".join(full_response)
-                if answer:
-                    conversation_history.append({"role": "assistant", "content": answer})
-                    save_history(conversation_history)
-
-        return Response(stream_with_context(generate()), mimetype="text/plain")
-
-    except Exception as e:
-        if DEV_MODE:
-            print(f"[ERROR] {e}")
-        return {"error": str(e)}, 500
-
-
-
-    return jsonify({"status": "online", "messages": len(conversation_history)})
-
-
-@app.route("/memory/clear", methods=["POST"])
-def clear_memory():
-    global conversation_history
-    conversation_history = []
-    save_history(conversation_history)
+def process_voice(wav_path):
+    """
+    Process a voice recording and return audio bytes.
+    Replaces the /process Flask route.
+    """
     if DEV_MODE:
-        print("[MEMORY] Cleared")
-    return jsonify({"status": "cleared"})
+        print("\n" + "="*50)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Voice command...")
+
+    user_query = transcribe_audio(wav_path)
+    if not user_query:
+        return None
+
+    search_query = get_search_query(user_query)
+    if search_query:
+        status("Searching the web...")
+        search_results = web_search(search_query)
+    else:
+        search_results = []
+
+    status("Thinking...")
+    response_text = generate_response(
+        user_query, search_results, SYSTEM_PROMPT_VOICE,
+        use_history=True, max_turns=VOICE_HISTORY_TURNS
+    )
+    return text_to_speech(response_text)
+
+
+def process_text(user_query):
+    """
+    Process a text query and return a response string.
+    Replaces the /process_text Flask route.
+    """
+    if DEV_MODE:
+        print("\n" + "="*50)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query...")
+
+    search_query = get_search_query(user_query, text_mode=True)
+    search_results = web_search(search_query) if search_query else []
+    return generate_response(
+        user_query, search_results, SYSTEM_PROMPT_TEXT,
+        use_history=TEXT_HISTORY_TURNS > 0,
+        max_turns=TEXT_HISTORY_TURNS if TEXT_HISTORY_TURNS > 0 else None
+    )
 
 
 # ── Client Interface ──────────────────────────────────────────────
@@ -709,7 +659,7 @@ class Friday:
         if LOCAL_TTS:
             tts_status += " (--local-tts)"
         print(f"TTS:     {tts_status}")
-        search_status = "Disabled (-no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
+        search_status = "Disabled (--no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
         print(f"Search:  {search_status}")
         flags = [f for f, v in [("dev", DEV_MODE), ("local-tts", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
         if flags:
@@ -780,11 +730,10 @@ class Friday:
             import ctypes
             import ctypes.wintypes
             kernel32 = ctypes.windll.kernel32
-            handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+            handle = kernel32.GetStdHandle(-10)
             mode = ctypes.wintypes.DWORD()
             kernel32.GetConsoleMode(handle, ctypes.byref(mode))
             self._old_console_mode = mode.value
-            # Clear ENABLE_ECHO_INPUT (0x0004) and ENABLE_LINE_INPUT (0x0002)
             kernel32.SetConsoleMode(handle, mode.value & ~0x0006)
         else:
             try:
@@ -863,10 +812,10 @@ class Friday:
 
         wav_file = self.stop_recording()
         if wav_file:
-            threading.Thread(target=self._send_voice, args=(wav_file,), daemon=True).start()
+            threading.Thread(target=self._handle_voice, args=(wav_file,), daemon=True).start()
 
     def _drain_stdin(self):
-        """Flush any buffered input (e.g. from holding Enter) before the next prompt."""
+        """Flush any buffered input before the next prompt."""
         import termios
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
 
@@ -880,36 +829,38 @@ class Friday:
         self._drain_stdin()
         wav_file = self.stop_recording()
         if wav_file:
-            threading.Thread(target=self._send_voice, args=(wav_file,), daemon=True).start()
+            threading.Thread(target=self._handle_voice, args=(wav_file,), daemon=True).start()
 
-    def _send_voice(self, wav_file):
+    def _handle_voice(self, wav_file):
+        """Call process_voice() directly and play the result."""
+        import time
+        t_start = time.time()
+        print("\n[>>] Processing...")
+        response_received = threading.Event()
+
+        def heartbeat():
+            interval = 60
+            elapsed = 0
+            while not response_received.wait(timeout=interval):
+                elapsed += interval
+                if elapsed == interval:
+                    print()
+                print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
+            print(f"\r{' ' * 40}\r\n", end="", flush=True)
+
+        threading.Thread(target=heartbeat, daemon=True).start()
+
         try:
-            import time
-            print("\n[>>] Sending to Friday...")
-            t_start = time.time()
-            response_received = threading.Event()
-
-            def heartbeat():
-                interval = 60
-                elapsed = 0
-                while not response_received.wait(timeout=interval):
-                    elapsed += interval
-                    if elapsed == interval:
-                        print()
-                    print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
-                print(f"\r{' ' * 40}\r\n", end="", flush=True)
-
-            threading.Thread(target=heartbeat, daemon=True).start()
-
-            with open(wav_file, 'rb') as f:
-                response = requests.post(f"{SERVER_URL}/process", files={'audio': f}, timeout=600)
+            audio_bytes = process_voice(wav_file)
             response_received.set()
-
-            if response.status_code == 200:
+            if audio_bytes:
                 elapsed = time.time() - t_start
                 print(f"  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
-                self._play_audio(response.content, t_start)
+                self._play_audio(audio_bytes, t_start)
+            else:
+                print(f"  {C.YELLOW}[!!] No response generated{C.RESET}")
         except Exception as e:
+            response_received.set()
             print(f"  {C.YELLOW}[!!] Error: {e}{C.RESET}")
 
     def _play_audio(self, audio_bytes, t_start=None):
@@ -959,15 +910,14 @@ class Friday:
                 print(f"[!!] Error: {e}")
 
     def _stream_text_response(self, text):
-        """Stream response tokens to terminal. Press ESC to cut off mid-stream.
-        If --voice flag is set, also plays the response as audio after streaming."""
+        """Stream response tokens directly from generate_response_stream().
+        Press ESC to cut off mid-stream. If --voice flag is set, also plays audio after."""
         import time
         stop_event = threading.Event()
         stream_done = threading.Event()
         full_response = []
 
         def watch_for_esc():
-            # Only watch for ESC if the stream hasn't already finished
             if stream_done.wait(timeout=0.05):
                 return
             try:
@@ -976,7 +926,7 @@ class Friday:
                     while not stream_done.is_set():
                         if msvcrt.kbhit():
                             ch = msvcrt.getwch()
-                            if ch == '\x1b':  # ESC
+                            if ch == '\x1b':
                                 stop_event.set()
                                 return
                 else:
@@ -999,52 +949,43 @@ class Friday:
         first_token_received = threading.Event()
 
         def heartbeat():
-            """Print 'still thinking' every 60s until first token arrives, overwriting each time."""
             interval = 60
             elapsed = 0
             while not first_token_received.wait(timeout=interval):
                 elapsed += interval
                 if elapsed == interval:
-                    print()  # Empty line before first heartbeat
+                    print()
                 print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
-            # Clear the heartbeat line when done so Friday's response starts clean
             print(f"\r{' ' * 40}\r\n", end="", flush=True)
 
         heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
         heartbeat_thread.start()
 
+        search_query = get_search_query(text, text_mode=True)
+        if search_query:
+            status("Searching the web...")
+            search_results = web_search(search_query)
+        else:
+            search_results = []
+        status("Thinking...")
+
         try:
-            with requests.post(
-                f"{SERVER_URL}/process_text_stream",
-                json={"text": text},
-                stream=True,
-                timeout=600
-            ) as response:
-                if response.status_code != 200:
-                    print(f"[!!] Server error: {response.status_code}")
-                    return
-                print("\nFriday: ", end="", flush=True)
-                for chunk in response.iter_content(chunk_size=None):
-                    if stop_event.is_set():
-                        response.close()
-                        elapsed = time.time() - t_start
-                        print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
-                        stopped_early = True
-                        break
-                    if chunk:
-                        first_token_received.set()
-                        decoded = chunk.decode("utf-8")
-                        print(decoded, end="", flush=True)
-                        full_response.append(decoded)
-                else:
+            print("\nFriday: ", end="", flush=True)
+            for token in generate_response_stream(text, search_results):
+                if stop_event.is_set():
                     elapsed = time.time() - t_start
-                    print(f"\n\n  {C.GREEN}✓ Done ({elapsed:.1f}s){C.RESET}\n")
-        except requests.exceptions.ChunkedEncodingError:
-            print(f"\n  {C.YELLOW}[stopped]{C.RESET}")
+                    print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
+                    stopped_early = True
+                    break
+                first_token_received.set()
+                print(token, end="", flush=True)
+                full_response.append(token)
+            else:
+                elapsed = time.time() - t_start
+                print(f"\n\n  {C.GREEN}✓ Done ({elapsed:.1f}s){C.RESET}\n")
         except Exception as e:
             print(f"\n  {C.YELLOW}[!!] Stream error: {e}{C.RESET}")
         finally:
-            # Signal watcher and heartbeat that stream is done
             stream_done.set()
             first_token_received.set()
 
@@ -1062,18 +1003,17 @@ class Friday:
     # ── Main Loop ─────────────────────────────────────────────────
 
     def _voice_loop(self):
-        """Continuous voice loop — runs in background thread for both normal and dev mode."""
+        """Continuous voice loop — runs in background thread."""
         while self.running:
             self.playback_done.clear()
             self.do_voice_session()
             self.playback_done.wait()
 
     def _start_voice_loop(self):
-        """Start the voice loop in a background thread and watch stdin for commands."""
+        """Start the voice loop and watch stdin for commands."""
         self.running = True
 
         if not DEV_MODE:
-            # Normal mode: start continuous voice loop immediately
             voice_thread = threading.Thread(target=self._voice_loop, daemon=True)
             voice_thread.start()
         else:
@@ -1086,10 +1026,8 @@ class Friday:
                 print("Goodbye.")
                 sys.exit(0)
             elif cmd in ("v", "") and DEV_MODE:
-                # Dev mode: trigger a single voice session on demand
                 self.do_voice_session()
             elif cmd == "t" and DEV_MODE:
-                # Pause voice loop if running, do text session, then restart
                 if voice_thread and voice_thread.is_alive():
                     self.running = False
                     voice_thread.join(timeout=2)
@@ -1099,7 +1037,6 @@ class Friday:
 
     def run(self):
         self._print_banner()
-        # Flush any buffered keypresses before listening
         if sys.platform == 'win32':
             import msvcrt
             while msvcrt.kbhit():
@@ -1135,14 +1072,11 @@ if __name__ == "__main__":
             print("\n  Run: python setup.py")
             sys.exit(0)
 
-    server_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=SERVER_PORT, debug=False, use_reloader=False),
-        daemon=True
-    )
-    server_thread.start()
-
-    import time
-    time.sleep(2)
+    # Confirm Ollama is reachable before loading the UI
+    if not check_ollama():
+        print(f"\n{C.YELLOW}  ! Cannot reach Ollama.{C.RESET}")
+        print(f"  Make sure it's running with: ollama serve\n")
+        sys.exit(1)
 
     friday = Friday()
     try:

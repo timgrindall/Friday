@@ -2,6 +2,22 @@
 
 ---
 
+## v1.0 (branch: Friday-ver-2)
+Major architectural refactor — Flask removed entirely.
+
+- Replaced Flask server/client architecture with direct function calls
+- `process_voice(wav_path)` replaces the `/process` route
+- `process_text(user_query)` replaces the `/process_text` route
+- `generate_response_stream()` is now a direct generator, replaces the `/process_text_stream` route
+- `clear_memory()` is now a standalone function (no HTTP endpoint)
+- Startup now pings Ollama directly via `check_ollama()` — replaces `/health` route
+- Removed Flask, `werkzeug`, and all `SERVER_URL`/`SERVER_PORT` config
+- `_send_voice()` renamed to `_handle_voice()` to reflect it no longer sends HTTP requests
+- Startup exits with a clear message if Ollama is not reachable (rather than silently failing later)
+- Marked `Post-1.0: Remove Flask server/client architecture` TODO as complete
+
+---
+
 ## v0.71
 - Ctrl+C in text mode now exits cleanly without traceback (EOFError and KeyboardInterrupt caught in watcher thread and text session)
 - Changed stream interrupt key from Enter to ESC to avoid accidental cutoffs
