@@ -1,5 +1,7 @@
 # Friday
 
+> **Branch: Friday-ver-2** — This branch is a major architectural refactor targeting v1.0. Flask has been removed entirely; all processing now happens via direct function calls with no internal HTTP server.
+
 A personal AI assistant that runs entirely on your local machine, named after the character Friday from Robinson Crusoe.
 
 **Everything runs in a single Python file.** No separate server/client needed — just `python friday.py`.
@@ -95,7 +97,6 @@ Adjust these at the top of `friday.py` to customize behavior:
 # Model and server
 OLLAMA_MODEL = "mistral"          # Swap to "phi" for faster, lower-quality responses
 OLLAMA_URL = "http://localhost:11434"
-SERVER_PORT = 5001
 TOKEN_CAP = 1000                  # Max conversation history tokens before trimming
 
 # Conversation context (how many past exchanges to include)
@@ -177,12 +178,6 @@ del friday_memory.json
 rm friday_memory.json
 ```
 
-Or via HTTP:
-
-```bash
-curl -X POST http://localhost:5001/memory/clear
-```
-
 ---
 
 ## Stack
@@ -194,7 +189,6 @@ curl -X POST http://localhost:5001/memory/clear
 | Text to Speech | [ElevenLabs](https://elevenlabs.io) → [Piper](https://github.com/rhasspy/piper) → pyttsx3 | ElevenLabs (best), Piper (good local), pyttsx3 (basic fallback) |
 | Web Search | [SerpAPI](https://serpapi.com) | Optional, triggered by keywords |
 | Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io) | Cross-platform |
-| Server | [Flask](https://flask.palletsprojects.com) | Built-in, runs in background thread |
 | Keyboard | [pynput](https://pypi.org/project/pynput/) | Global hotkeys for voice recording |
 
 ---
