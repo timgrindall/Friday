@@ -1,4 +1,4 @@
-# Version 1.0
+# Version 2.0
 
 """
 Friday - Voice and Text Assistant
@@ -19,7 +19,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # ── TODO ─────────────────────────────────────────────────────────
 # [ ] Research and test wake word / wake on voice feature
 # [x] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
-# [ ] Note: I do not like the search context feature, way too unpredictable. lets get rid of it.
+# [x] Note: I do not like the search context feature, way too unpredictable. lets get rid of it.
 # [ ] Fix the bug ...
 # [x] Text mode should always perform a web search; voice mode uses keyword triggers only
 # [x] Integrate setup script into main file, add colors matching friday.py
@@ -92,6 +92,9 @@ ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 # Piper TTS (higher quality than pyttsx3, fully local)
 # Models: https://github.com/rhasspy/piper/blob/master/VOICES.md
 PIPER_VOICE        = os.getenv("PIPER_VOICE", "en_US-lessac-medium")  # Free, clear, medium quality
+
+AUDIO_DEVICE = 2     # Input device index (None = system default)
+                     # Run: python -c "import sounddevice as sd; print(sd.query_devices())"
 
 TEMP_DIR     = tempfile.gettempdir()
 AUDIO_INPUT  = os.path.join(TEMP_DIR, "friday_input.wav")
@@ -224,82 +227,116 @@ def web_search(query):
         return []
 
 
-SEARCH_TRIGGERS = (
-    # Time-sensitive language
-    "today", "current", "latest", "now", "recent", "right now",
-    "this week", "this month", "this year", "tomorrow", "yesterday",
-    "happening", "update", "news", "announce", "just",
+# ── Search heuristics ─────────────────────────────────────────────
+#
+# Three independent checks. Any one match triggers a search.
+#
+# Case 1: Time anchor + question structure
+#   A time word is only meaningful if the query is actually asking something
+#   factual — "how are we doing today" should not trigger, "what's the
+#   weather today" should.
+#
+# Case 2: Real-time data keywords
+#   Words that almost always imply live data regardless of phrasing.
+#
+# Case 3: Named entity + state verb
+#   A capitalised word (proper noun) followed by a present-tense state verb
+#   suggests the user wants current information about a specific entity.
 
-    # Data and results
-    "weather", "forecast", "price", "stock", "score", "standings",
-    "results", "who won", "election",
+import re
 
-    # People likely to have recent news
-    "elon musk", "trump", "biden", "obama", "putin", "zelensky",
-    "musk", "zuckerberg", "bezos", "cook", "altman",
+_TIME_ANCHORS = {
+    "today", "right now", "currently", "at the moment", "latest", "recent",
+    "recently", "just announced", "this week", "this month", "this year",
+    "tomorrow", "yesterday", "still", "anymore", "now",
+}
 
-    # Companies and orgs with ongoing news
-    "spacex", "tesla", "openai", "anthropic", "google", "apple",
-    "microsoft", "meta", "amazon", "nasa", "fda", "fed ",
+_QUESTION_WORDS = {
+    "what", "who", "when", "where", "how much", "how many", "how is",
+    "how are", "is ", "are ", "was ", "were ", "has ", "have ", "did ",
+    "does ", "do ",
+}
 
-    # Topics that change frequently
-    "mars mission", "ai model", "crypto", "bitcoin", "interest rate",
-    "inflation", "war", "conflict", "sanctions", "tariff",
-
-    # Custom search triggers for AI models
-    "Claude", "Gemini", "Llama", "Mistral", "Falcon", "Bard", "Ernie", "Gemini Pro",
-    "OpenAI", "Google AI", "Anthropic", "DeepMind", "AI Dungeon", "Character.AI",
-    "Openclaw", "Gemini Ultra", "Mistral 4 Small",
-)
-
-def first_sentence(text):
-    """Extract the first sentence from a query for cleaner search results."""
-    import re
-    match = re.split(r'(?<=[.!?])\s', text.strip(), maxsplit=1)
-    return match[0].strip() if match else text.strip()
+_REALTIME_KEYWORDS = {
+    "weather", "forecast", "temperature", "price", "stock", "share price",
+    "score", "standings", "results", "who won", "election", "traffic",
+    "exchange rate", "crypto", "bitcoin", "inflation", "interest rate", "news",
+}
 
 
-# Pronouns and vague references that signal the query depends on prior context
-CONTEXT_REFS = (
-    "those", "them", "they", "their", "it", "its", "that", "these",
-    "each of", "all of", "one of", "the same", "the above", "the following",
-    "previously", "mentioned", "listed", "said"
-)
+_GREETING_PATTERNS = {
+    "how are we", "how are you", "how are things", "how is it going",
+    "how am i", "how have you", "how do you do",
+}
 
-def resolve_search_query(query):
+def _case1_time_anchor_plus_question(q):
+    """Time word + question structure, excluding conversational greetings."""
+    has_time = any(anchor in q for anchor in _TIME_ANCHORS)
+    if not has_time:
+        return False
+    if any(g in q for g in _GREETING_PATTERNS):
+        return False
+    has_question = any(qw in q for qw in _QUESTION_WORDS)
+    return has_question
+
+
+def _case2_realtime_keyword(q):
+    """Real-time data keyword present."""
+    return any(kw in q for kw in _REALTIME_KEYWORDS)
+
+
+def _case3_named_entity_plus_verb(query, q):
     """
-    If the query contains vague references, prepend the last assistant topic
-    from conversation history so the search has enough context.
+    Proper noun followed within 30 chars by a state verb.
+    Excludes the first word of the sentence (likely capitalised due to grammar)
+    and single-word proper nouns at position 0.
+    e.g. matches: "Is Elon Musk still at Tesla?" "Apple has released..."
+    e.g. no match: "What is the capital of France?" "How are you?"
     """
-    q = query.lower()
-    if any(ref in q for ref in CONTEXT_REFS):
-        prior = [m for m in conversation_history if m["role"] == "assistant"]
-        if prior:
-            last = first_sentence(prior[-1]["content"])
-            combined = f"{first_sentence(query)} {last}"
-            if DEV_MODE:
-                print(f"  Search context resolved: {combined[:80]}...")
-            return combined
-    return first_sentence(query)
+    # Find all proper nouns that are NOT the first word of the query
+    words = query.split()
+    candidates = [w for w in words[1:] if re.match(r'^[A-Z][a-zA-Z]{2,}$', w)]
+    if not candidates:
+        return False
+    for noun in candidates:
+        # Check if a state verb appears within 30 chars after the noun
+        pattern = re.escape(noun) + r'.{0,30}( is | are | has | have | does | do | was | still | currently )'
+        if re.search(pattern, query):
+            return True
+    return False
+
+
+def needs_search(query):
+    """
+    Returns True if the query is likely to need current information.
+    Three independent heuristic checks — any match triggers a search.
+    """
+    q = " " + query.lower() + " "  # pad so word-boundary checks work at start/end
+    if _case1_time_anchor_plus_question(q):
+        if DEV_MODE:
+            print("  Search: time anchor + question")
+        return True
+    if _case2_realtime_keyword(q):
+        if DEV_MODE:
+            print("  Search: real-time keyword")
+        return True
+    if _case3_named_entity_plus_verb(query, q):
+        if DEV_MODE:
+            print("  Search: named entity + state verb")
+        return True
+    return False
 
 
 def get_search_query(query, text_mode=False):
     """
-    Returns the query string if a web search is needed, or None if not.
-    Text mode always searches. Voice mode uses keyword triggers only.
+    Returns the query string if a web search should be performed, or None.
+    Both text and voice mode use the same heuristics.
     Returns None immediately if --no-search flag is set.
-    Only the first sentence is sent to search, with context resolved for vague references.
     """
     if NO_SEARCH:
         return None
-    if text_mode:
-        return resolve_search_query(query)
-    q = query.lower()
-    if any(trigger in q for trigger in SEARCH_TRIGGERS):
-        search_query = resolve_search_query(query)
-        if DEV_MODE:
-            print(f"  Search triggered: {search_query}")
-        return search_query
+    if needs_search(query):
+        return query
     return None
 
 
@@ -620,7 +657,7 @@ def process_text(user_query):
         print("\n" + "="*50)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query...")
 
-    search_query = get_search_query(user_query, text_mode=True)
+    search_query = get_search_query(user_query)
     search_results = web_search(search_query) if search_query else []
     return generate_response(
         user_query, search_results, SYSTEM_PROMPT_TEXT,
@@ -695,7 +732,8 @@ class Friday:
 
         self.stream = sd.InputStream(
             samplerate=self.RATE, channels=self.CHANNELS,
-            dtype='int16', callback=callback
+            dtype='int16', callback=callback,
+            device=AUDIO_DEVICE
         )
         self.stream.start()
 
@@ -961,7 +999,7 @@ class Friday:
         heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
         heartbeat_thread.start()
 
-        search_query = get_search_query(text, text_mode=True)
+        search_query = get_search_query(text)
         if search_query:
             status("Searching the web...")
             search_results = web_search(search_query)
