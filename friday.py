@@ -1,4 +1,4 @@
-# Version 2.0
+# Version 1.1
 
 """
 Friday - Voice and Text Assistant
@@ -12,6 +12,7 @@ Flags:
     --local-tts  Force local TTS (Piper/pyttsx3), skip ElevenLabs
     --no-search  Disable web search even if SerpAPI key is present
     --voice      Play audio response in text/dev mode (requires --dev)
+    --model      Override the Ollama model, e.g. --model mistral
 
 In text mode, press ESC while a response is streaming to cut it off early.
 """
@@ -24,6 +25,9 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Text mode should always perform a web search; voice mode uses keyword triggers only
 # [x] Integrate setup script into main file, add colors matching friday.py
 # [x] Rename --offline-tts flag to --local-tts
+# [ ] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
+# [ ] Fix general bugginess in the text interface, especially spacebar capture for voice mode
+# [ ] Test and Fix Piper not being heard or working at all.
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -74,13 +78,25 @@ LOCAL_TTS  = "--local-tts" in sys.argv  # Force local TTS (Piper/pyttsx3), skip 
 NO_SEARCH  = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 VOICE_TEXT = "--voice"     in sys.argv  # Play audio response in text mode (dev fun)
 
+def _get_flag_value(flag, default):
+    """Return the value following a flag (e.g. --model mistral), or default if not passed."""
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return default
+
+CLI_MODEL = _get_flag_value("--model", None)  # Override OLLAMA_MODEL, e.g. --model mistral
+
 # ── Configuration ────────────────────────────────────────────────
 
-OLLAMA_MODEL     = "mistral"
+OLLAMA_MODEL     = CLI_MODEL or "gemma4:e4b"
 OLLAMA_URL       = "http://localhost:11434"
+OLLAMA_THINK     = False   # Set True to enable model "thinking" mode (slower; supported by reasoning models e.g. Gemma 4 E4B)
+OLLAMA_KEEP_ALIVE = "30m"  # How long Ollama keeps the model loaded after the last request ("-1" = forever, until Ollama restarts)
 MEMORY_FILE      = "friday_memory.json"
 TOKEN_CAP        = 1000
-TEXT_HISTORY_TURNS  = 2     # Number of previous exchanges to include in text mode (0 = disabled)
+TEXT_HISTORY_TURNS  = 5     # Number of previous exchanges to include in text mode (0 = disabled)
 VOICE_HISTORY_TURNS = 1     # Number of previous exchanges to include in voice mode (0 = disabled)
 MAX_RESPONSE_TOKENS      = 160   # Max tokens for voice responses (Ollama's num_predict)
 MAX_TEXT_RESPONSE_TOKENS = 800   # Max tokens for text/streaming responses
@@ -180,6 +196,30 @@ def check_ollama():
         return response.status_code == 200
     except Exception:
         return False
+
+
+def warm_up_ollama():
+    """Send a throwaway request so Ollama loads the model into memory now,
+    instead of making the first real query pay the cold-load cost."""
+    status(f"Warming up {OLLAMA_MODEL}... (this can take a minute on first load)")
+    try:
+        requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+                "think": OLLAMA_THINK,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
+                "options": {"num_predict": 1},
+            },
+            timeout=120
+        )
+        print(f"  {C.GREEN}✓ {OLLAMA_MODEL} ready{C.RESET}")
+    except Exception as e:
+        print(f"  {C.YELLOW}! Warm-up failed, Friday will still run but the first response may be slow{C.RESET}")
+        if DEV_MODE:
+            print(f"[ERROR] Warm-up failed: {e}")
 
 
 def transcribe_audio(wav_path):
@@ -397,6 +437,8 @@ def generate_response(user_query, search_results, system_prompt, use_history=Tru
                 "model": OLLAMA_MODEL,
                 "messages": [{"role": "system", "content": system_prompt}] + context,
                 "stream": False,
+                "think": OLLAMA_THINK,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
                 "options": {"num_predict": MAX_RESPONSE_TOKENS},
             },
             timeout=600
@@ -452,6 +494,8 @@ def generate_response_stream(user_query, search_results):
                 "model": OLLAMA_MODEL,
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT_TEXT}] + context,
                 "stream": True,
+                "think": OLLAMA_THINK,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
                 "options": {"num_predict": MAX_TEXT_RESPONSE_TOKENS},
             },
             stream=True,
@@ -736,6 +780,12 @@ class Friday:
             device=AUDIO_DEVICE
         )
         self.stream.start()
+        # Give the audio device a moment to actually start capturing before
+        # we consider recording "live" — without this, the first ~100-300ms
+        # of speech can be lost to driver/device startup latency, cutting
+        # off the first word(s) of whatever was said.
+        import time as _time
+        _time.sleep(0.3)
 
     def stop_recording(self):
         if not self.recording:
@@ -747,8 +797,8 @@ class Friday:
             if not self.audio_frames:
                 return None
             audio_data = np.concatenate(self.audio_frames, axis=0)
-            # Prepend 500ms of silence so Whisper doesn't mishear the first words
-            silence = np.zeros((int(self.RATE * 0.5), self.CHANNELS), dtype=np.int16)
+            # Prepend 1000ms of silence so Whisper doesn't mishear the first words
+            silence = np.zeros((int(self.RATE * 1.0), self.CHANNELS), dtype=np.int16)
             audio_data = np.concatenate([silence, audio_data])
             with wave.open(self.INPUT_FILE, 'wb') as wf:
                 wf.setnchannels(self.CHANNELS)
@@ -985,16 +1035,21 @@ class Friday:
         t_start = time.time()
         stopped_early = False
         first_token_received = threading.Event()
+        heartbeat_cleared = threading.Event()
 
         def heartbeat():
             interval = 60
             elapsed = 0
+            printed_anything = False
             while not first_token_received.wait(timeout=interval):
                 elapsed += interval
                 if elapsed == interval:
                     print()
                 print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
-            print(f"\r{' ' * 40}\r\n", end="", flush=True)
+                printed_anything = True
+            if printed_anything:
+                print(f"\r{' ' * 40}\r", end="", flush=True)
+            heartbeat_cleared.set()
 
         heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
         heartbeat_thread.start()
@@ -1008,14 +1063,18 @@ class Friday:
         status("Thinking...")
 
         try:
-            print("\nFriday: ", end="", flush=True)
+            friday_label_printed = False
             for token in generate_response_stream(text, search_results):
                 if stop_event.is_set():
                     elapsed = time.time() - t_start
                     print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
                     stopped_early = True
                     break
-                first_token_received.set()
+                if not friday_label_printed:
+                    first_token_received.set()
+                    heartbeat_cleared.wait(timeout=1)
+                    print("\nFriday: ", end="", flush=True)
+                    friday_label_printed = True
                 print(token, end="", flush=True)
                 full_response.append(token)
             else:
@@ -1115,6 +1174,8 @@ if __name__ == "__main__":
         print(f"\n{C.YELLOW}  ! Cannot reach Ollama.{C.RESET}")
         print(f"  Make sure it's running with: ollama serve\n")
         sys.exit(1)
+
+    warm_up_ollama()
 
     friday = Friday()
     try:
