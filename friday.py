@@ -21,13 +21,12 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [ ] Research and test wake word / wake on voice feature
 # [x] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
 # [x] Note: I do not like the search context feature, way too unpredictable. lets get rid of it.
-# [ ] Fix the bug ...
+# [x] Fix the bug where the first couple words of voice queries got cut off or garbled (fixed via recording warmup window + delayed "speak now" cue)
 # [x] Text mode should always perform a web search; voice mode uses keyword triggers only
 # [x] Integrate setup script into main file, add colors matching friday.py
 # [x] Rename --offline-tts flag to --local-tts
 # [ ] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
-# [ ] Fix general bugginess in the text interface, especially spacebar capture for voice mode
-# [ ] Test and Fix Piper not being heard or working at all.
+# [ ] Fix general bugginess in the text interface
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -96,7 +95,7 @@ OLLAMA_THINK     = False   # Set True to enable model "thinking" mode (slower; s
 OLLAMA_KEEP_ALIVE = "30m"  # How long Ollama keeps the model loaded after the last request ("-1" = forever, until Ollama restarts)
 MEMORY_FILE      = "friday_memory.json"
 TOKEN_CAP        = 1000
-TEXT_HISTORY_TURNS  = 5     # Number of previous exchanges to include in text mode (0 = disabled)
+TEXT_HISTORY_TURNS  = 2     # Number of previous exchanges to include in text mode (0 = disabled)
 VOICE_HISTORY_TURNS = 1     # Number of previous exchanges to include in voice mode (0 = disabled)
 MAX_RESPONSE_TOKENS      = 160   # Max tokens for voice responses (Ollama's num_predict)
 MAX_TEXT_RESPONSE_TOKENS = 800   # Max tokens for text/streaming responses
@@ -724,6 +723,9 @@ class Friday:
         self.RATE = 16000
         self.INPUT_FILE = AUDIO_INPUT
         self.OUTPUT_FILE = AUDIO_OUTPUT
+        self.RECORDING_WARMUP_SECONDS = 1.25  # Discard audio captured in this window after
+                                                # start_recording() — gives the device time to
+                                                # stabilize so early speech isn't lost
 
     def _print_banner(self):
         print(f"\n{C.GREEN}" + "="*50)
@@ -766,12 +768,13 @@ class Friday:
     def start_recording(self):
         if self.recording:
             return
+        import time
         self.recording = True
         self.audio_frames = []
-        print("[Mic] Recording...")
+        self._recording_started_at = time.time()
 
-        def callback(indata, frames, time, status):
-            if self.recording:
+        def callback(indata, frames, time_info, status):
+            if self.recording and (time.time() - self._recording_started_at) >= self.RECORDING_WARMUP_SECONDS:
                 self.audio_frames.append(indata.copy())
 
         self.stream = sd.InputStream(
@@ -780,23 +783,34 @@ class Friday:
             device=AUDIO_DEVICE
         )
         self.stream.start()
-        # Give the audio device a moment to actually start capturing before
-        # we consider recording "live" — without this, the first ~100-300ms
-        # of speech can be lost to driver/device startup latency, cutting
-        # off the first word(s) of whatever was said.
-        import time as _time
-        _time.sleep(0.3)
+
+        def _print_speak_now():
+            # Only print if we're still recording — avoids a stale "speak now"
+            # message appearing after a very quick tap-and-release already stopped it
+            if self.recording:
+                print(f"  {C.GREEN}🎤 Recording — speak now{C.RESET}")
+
+        self._speak_now_timer = threading.Timer(self.RECORDING_WARMUP_SECONDS, _print_speak_now)
+        self._speak_now_timer.daemon = True
+        self._speak_now_timer.start()
 
     def stop_recording(self):
         if not self.recording:
             return None
         self.recording = False
+        if hasattr(self, '_speak_now_timer'):
+            self._speak_now_timer.cancel()
         try:
             self.stream.stop()
             self.stream.close()
             if not self.audio_frames:
+                if DEV_MODE:
+                    print(f"  {C.YELLOW}[DEBUG] 0 audio frames captured — hold was shorter than the {self.RECORDING_WARMUP_SECONDS}s warmup window, or the device never started{C.RESET}")
                 return None
             audio_data = np.concatenate(self.audio_frames, axis=0)
+            if DEV_MODE:
+                duration_s = len(audio_data) / self.RATE
+                print(f"  {C.YELLOW}[DEBUG] Captured {duration_s:.2f}s of audio ({len(self.audio_frames)} chunks, {len(audio_data)} samples){C.RESET}")
             # Prepend 1000ms of silence so Whisper doesn't mishear the first words
             silence = np.zeros((int(self.RATE * 1.0), self.CHANNELS), dtype=np.int16)
             audio_data = np.concatenate([silence, audio_data])
@@ -925,30 +939,37 @@ class Friday:
         t_start = time.time()
         print("\n[>>] Processing...")
         response_received = threading.Event()
+        heartbeat_cleared = threading.Event()
 
         def heartbeat():
             interval = 60
             elapsed = 0
+            printed_anything = False
             while not response_received.wait(timeout=interval):
                 elapsed += interval
                 if elapsed == interval:
                     print()
                 print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
-            print(f"\r{' ' * 40}\r\n", end="", flush=True)
+                printed_anything = True
+            if printed_anything:
+                print(f"\r{' ' * 40}\r", end="", flush=True)
+            heartbeat_cleared.set()
 
         threading.Thread(target=heartbeat, daemon=True).start()
 
         try:
             audio_bytes = process_voice(wav_file)
             response_received.set()
+            heartbeat_cleared.wait(timeout=1)
             if audio_bytes:
                 elapsed = time.time() - t_start
-                print(f"  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
+                print(f"\n  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
                 self._play_audio(audio_bytes, t_start)
             else:
                 print(f"  {C.YELLOW}[!!] No response generated{C.RESET}")
         except Exception as e:
             response_received.set()
+            heartbeat_cleared.wait(timeout=1)
             print(f"  {C.YELLOW}[!!] Error: {e}{C.RESET}")
 
     def _play_audio(self, audio_bytes, t_start=None):
