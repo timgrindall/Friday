@@ -25,7 +25,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Text mode should always perform a web search; voice mode uses keyword triggers only
 # [x] Integrate setup script into main file, add colors matching friday.py
 # [x] Rename --offline-tts flag to --local-tts
-# [ ] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
+# [x] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
 # [ ] Fix general bugginess in the text interface
 # ─────────────────────────────────────────────────────────────────
 
@@ -50,6 +50,7 @@ import whisper
 import requests
 from pynput import keyboard
 from dotenv import load_dotenv
+from rich.console import Console
 
 load_dotenv()
 
@@ -69,6 +70,8 @@ class C:
     CYAN    = "\033[96m"
     YELLOW  = "\033[93m"
     RESET   = "\033[0m"
+
+console = Console()
 
 # ── Flags ─────────────────────────────────────────────────────────
 
@@ -200,25 +203,31 @@ def check_ollama():
 def warm_up_ollama():
     """Send a throwaway request so Ollama loads the model into memory now,
     instead of making the first real query pay the cold-load cost."""
-    status(f"Warming up {OLLAMA_MODEL}... (this can take a minute on first load)")
-    try:
-        requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "stream": False,
-                "think": OLLAMA_THINK,
-                "keep_alive": OLLAMA_KEEP_ALIVE,
-                "options": {"num_predict": 1},
-            },
-            timeout=120
-        )
+    success = True
+    err = None
+    with console.status(f"[cyan]Warming up {OLLAMA_MODEL}... (this can take a minute on first load)[/cyan]"):
+        try:
+            requests.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": False,
+                    "think": OLLAMA_THINK,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": {"num_predict": 1},
+                },
+                timeout=120
+            )
+        except Exception as e:
+            success = False
+            err = e
+    if success:
         print(f"  {C.GREEN}✓ {OLLAMA_MODEL} ready{C.RESET}")
-    except Exception as e:
+    else:
         print(f"  {C.YELLOW}! Warm-up failed, Friday will still run but the first response may be slow{C.RESET}")
         if DEV_MODE:
-            print(f"[ERROR] Warm-up failed: {e}")
+            print(f"[ERROR] Warm-up failed: {err}")
 
 
 def transcribe_audio(wav_path):
@@ -658,11 +667,6 @@ def tts_local(text):
 
 # ── Processing Functions (replaces Flask routes) ──────────────────
 
-def status(message):
-    """Print a cyan status message."""
-    print(f"\n  {C.CYAN}⟳ {message}{C.RESET}", flush=True)
-
-
 def process_voice(wav_path):
     """
     Process a voice recording and return audio bytes.
@@ -678,17 +682,19 @@ def process_voice(wav_path):
 
     search_query = get_search_query(user_query)
     if search_query:
-        status("Searching the web...")
-        search_results = web_search(search_query)
+        with console.status("[cyan]Searching the web...[/cyan]"):
+            search_results = web_search(search_query)
     else:
         search_results = []
 
-    status("Thinking...")
-    response_text = generate_response(
-        user_query, search_results, SYSTEM_PROMPT_VOICE,
-        use_history=True, max_turns=VOICE_HISTORY_TURNS
-    )
-    return text_to_speech(response_text)
+    with console.status("[cyan]Thinking...[/cyan]"):
+        response_text = generate_response(
+            user_query, search_results, SYSTEM_PROMPT_VOICE,
+            use_history=True, max_turns=VOICE_HISTORY_TURNS
+        )
+
+    with console.status("[cyan]Generating audio...[/cyan]"):
+        return text_to_speech(response_text)
 
 
 def process_text(user_query):
@@ -937,30 +943,8 @@ class Friday:
         """Call process_voice() directly and play the result."""
         import time
         t_start = time.time()
-        print("\n[>>] Processing...")
-        response_received = threading.Event()
-        heartbeat_cleared = threading.Event()
-
-        def heartbeat():
-            interval = 60
-            elapsed = 0
-            printed_anything = False
-            while not response_received.wait(timeout=interval):
-                elapsed += interval
-                if elapsed == interval:
-                    print()
-                print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
-                printed_anything = True
-            if printed_anything:
-                print(f"\r{' ' * 40}\r", end="", flush=True)
-            heartbeat_cleared.set()
-
-        threading.Thread(target=heartbeat, daemon=True).start()
-
         try:
             audio_bytes = process_voice(wav_file)
-            response_received.set()
-            heartbeat_cleared.wait(timeout=1)
             if audio_bytes:
                 elapsed = time.time() - t_start
                 print(f"\n  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
@@ -968,8 +952,6 @@ class Friday:
             else:
                 print(f"  {C.YELLOW}[!!] No response generated{C.RESET}")
         except Exception as e:
-            response_received.set()
-            heartbeat_cleared.wait(timeout=1)
             print(f"  {C.YELLOW}[!!] Error: {e}{C.RESET}")
 
     def _play_audio(self, audio_bytes, t_start=None):
@@ -1055,45 +1037,29 @@ class Friday:
 
         t_start = time.time()
         stopped_early = False
-        first_token_received = threading.Event()
-        heartbeat_cleared = threading.Event()
-
-        def heartbeat():
-            interval = 60
-            elapsed = 0
-            printed_anything = False
-            while not first_token_received.wait(timeout=interval):
-                elapsed += interval
-                if elapsed == interval:
-                    print()
-                print(f"\r  {C.CYAN}⟳ Still thinking... ({elapsed}s){C.RESET}  ", end="", flush=True)
-                printed_anything = True
-            if printed_anything:
-                print(f"\r{' ' * 40}\r", end="", flush=True)
-            heartbeat_cleared.set()
-
-        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
-        heartbeat_thread.start()
 
         search_query = get_search_query(text)
         if search_query:
-            status("Searching the web...")
-            search_results = web_search(search_query)
+            with console.status("[cyan]Searching the web...[/cyan]"):
+                search_results = web_search(search_query)
         else:
             search_results = []
-        status("Thinking...")
+
+        thinking_status = console.status("[cyan]Thinking...[/cyan]")
+        thinking_status.start()
 
         try:
             friday_label_printed = False
             for token in generate_response_stream(text, search_results):
                 if stop_event.is_set():
                     elapsed = time.time() - t_start
+                    if not friday_label_printed:
+                        thinking_status.stop()
                     print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
                     stopped_early = True
                     break
                 if not friday_label_printed:
-                    first_token_received.set()
-                    heartbeat_cleared.wait(timeout=1)
+                    thinking_status.stop()
                     print("\nFriday: ", end="", flush=True)
                     friday_label_printed = True
                 print(token, end="", flush=True)
@@ -1104,14 +1070,14 @@ class Friday:
         except Exception as e:
             print(f"\n  {C.YELLOW}[!!] Stream error: {e}{C.RESET}")
         finally:
+            thinking_status.stop()
             stream_done.set()
-            first_token_received.set()
 
         # --voice flag: play the response as audio after streaming
         if VOICE_TEXT and full_response and not stopped_early:
             response_text = "".join(full_response)
-            print(f"  {C.CYAN}⟳ Generating audio...{C.RESET}", flush=True)
-            audio_bytes = text_to_speech(response_text)
+            with console.status("[cyan]Generating audio...[/cyan]"):
+                audio_bytes = text_to_speech(response_text)
             if audio_bytes:
                 t_voice_start = time.time()
                 threading.Thread(

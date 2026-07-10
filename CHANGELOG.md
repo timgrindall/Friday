@@ -2,6 +2,20 @@
 
 ---
 
+## v1.1
+Replaced all hand-rolled terminal status printing with `rich` animated spinners.
+
+- Added `rich` as a dependency; `console = Console()` created at module level
+- Deleted `status()` function — all call sites replaced with `console.status()` context managers
+- `warm_up_ollama()`: spinner wraps the Ollama POST request; result prints after context exits
+- `process_voice()`: three sequential spinners — Searching, Thinking, Generating audio
+- `_handle_voice()`: heartbeat thread, `response_received` event, and `heartbeat_cleared` event removed entirely — `process_voice()` now owns its own spinners
+- `_stream_text_response()`: heartbeat thread, `first_token_received` event, and `heartbeat_cleared` event removed; Searching wraps `web_search()`; Thinking uses `.start()`/`.stop()` to stay alive until the first streaming token arrives; Generating audio wraps `text_to_speech()` under `--voice` flag
+- Removed all `\r` erase lines
+- Added `rich` to `requirements.txt`
+
+---
+
 ## v1.0 (branch: Friday-ver-2)
 Major architectural refactor — Flask removed entirely.
 
