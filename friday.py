@@ -27,6 +27,10 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Rename --offline-tts flag to --local-tts
 # [x] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
 # [ ] Fix general bugginess in the text interface
+# [ ] Experiment (new branch): minimalist voice UI — single-line overwriting status,
+#     spinner + "Thinking..." during LLM wait, elapsed time on completion, no other
+#     status noise; text mode requires --text-mode flag (not --dev); both modes still
+#     show warmup message; text streaming unchanged
 # ─────────────────────────────────────────────────────────────────
 
 import os
