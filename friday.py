@@ -1,4 +1,4 @@
-# Version 1.1
+# Version 1.2
 
 """
 Friday - Voice and Text Assistant
@@ -8,10 +8,10 @@ Runs as a single program - no separate server/client needed.
 Just: python friday.py
 
 Flags:
-    --dev        Verbose logging + text input + streaming responses
+    --text       Text input mode with streaming responses
+    --dev        Verbose debug logging
     --local-tts  Force local TTS (Piper/pyttsx3), skip ElevenLabs
     --no-search  Disable web search even if SerpAPI key is present
-    --voice      Play audio response in text/dev mode (requires --dev)
     --model      Override the Ollama model, e.g. --model mistral
 
 In text mode, press ESC while a response is streaming to cut it off early.
@@ -27,22 +27,22 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Rename --offline-tts flag to --local-tts
 # [x] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
 # [ ] Fix general bugginess in the text interface
-# [ ] Experiment (new branch): minimalist voice UI — single-line overwriting status,
-#     spinner + "Thinking..." during LLM wait, elapsed time on completion, no other
-#     status noise; text mode requires --text-mode flag (not --dev); both modes still
-#     show warmup message; text streaming unchanged
+# [~] Experiment (new branch): minimalist voice UI — single-line overwriting status,
+#     spinner + "Thinking..." during LLM wait, elapsed time on completion; --text flag
+#     for text mode; no standby; Ctrl+C to exit (in progress on Friday-ver-3)
 # ─────────────────────────────────────────────────────────────────
 
 import os
 import sys
 import json
+import re
+import time
 import wave
 import tempfile
 import threading
 import io
 import warnings
 import logging
-from datetime import datetime
 
 # Suppress noisy startup messages
 warnings.filterwarnings("ignore")
@@ -54,7 +54,6 @@ import whisper
 import requests
 from pynput import keyboard
 from dotenv import load_dotenv
-from rich.console import Console
 
 load_dotenv()
 
@@ -70,19 +69,110 @@ def _enable_windows_ansi():
 _enable_windows_ansi()
 
 class C:
-    GREEN   = "\033[92m"
-    CYAN    = "\033[96m"
-    YELLOW  = "\033[93m"
-    RESET   = "\033[0m"
+    DIM    = "\033[2m"
+    GREEN  = "\033[92m"
+    CYAN   = "\033[96m"
+    YELLOW = "\033[93m"
+    RESET  = "\033[0m"
 
-console = Console()
+
+# ── Status Line ───────────────────────────────────────────────────
+
+class StatusLine:
+    """
+    Single-line overwriting terminal status with optional animated spinner.
+
+    Normal mode: uses \\r to update a single line in place.
+    Dev mode   : degrades to plain print() — rolling output is fine for debugging.
+
+    All public methods are thread-safe.
+    """
+    _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    _W = 60  # pad to this width to erase trailing chars
+
+    def __init__(self):
+        self._text     = ""
+        self._spinning = False
+        self._frame    = 0
+        self._timer    = None
+        self._lock     = threading.Lock()
+
+    def set(self, text, spinner=False):
+        """Update the status line. spinner=True animates a braille prefix."""
+        with self._lock:
+            self._halt()
+            self._text     = text
+            self._spinning = spinner and not DEV_MODE  # no animation in dev mode
+        if DEV_MODE:
+            print(f"  {text}")
+        elif spinner:
+            self._tick()
+        else:
+            self._draw(text)
+
+    def finish(self, elapsed):
+        """Show '✓  X.Xs' for 3 s then reset to 'Ready'."""
+        self.set(f"✓  {elapsed:.1f}s")
+        t = threading.Timer(3.0, lambda: self.set("Ready"))
+        t.daemon = True
+        t.start()
+
+    def clear(self):
+        """Erase the status line (no-op in dev mode)."""
+        with self._lock:
+            self._halt()
+        if not DEV_MODE:
+            sys.stdout.write(f"\r{' ' * self._W}\r")
+            sys.stdout.flush()
+
+    # ── Internal ──────────────────────────────────────────────────
+
+    def _draw(self, content):
+        sys.stdout.write(f"\r  {content:<{self._W - 2}}")
+        sys.stdout.flush()
+
+    def _tick(self):
+        with self._lock:
+            if not self._spinning:
+                return
+            f = self._FRAMES[self._frame % len(self._FRAMES)]
+            self._frame += 1
+            text = self._text
+        self._draw(f"{f} {text}")
+        with self._lock:
+            if not self._spinning:
+                return
+            self._timer = threading.Timer(0.08, self._tick)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _halt(self):
+        """Stop spinner. Must be called while holding self._lock."""
+        self._spinning = False
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+
+status = StatusLine()
+
+
+def dev_log(msg):
+    """Muted rolling debug output — only active with --dev."""
+    if DEV_MODE:
+        print(f"  {C.DIM}{msg}{C.RESET}")
+
+
+def _clear_screen():
+    os.system('cls' if sys.platform == 'win32' else 'clear')
+
 
 # ── Flags ─────────────────────────────────────────────────────────
 
-DEV_MODE   = "--dev"       in sys.argv  # Verbose logging + text input + streaming
-LOCAL_TTS  = "--local-tts" in sys.argv  # Force local TTS (Piper/pyttsx3), skip ElevenLabs
-NO_SEARCH  = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
-VOICE_TEXT = "--voice"     in sys.argv  # Play audio response in text mode (dev fun)
+DEV_MODE  = "--dev"       in sys.argv  # Verbose debug logging
+TEXT_MODE = "--text"      in sys.argv  # Text input mode with streaming responses
+LOCAL_TTS = "--local-tts" in sys.argv  # Skip ElevenLabs, force local TTS
+NO_SEARCH = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 
 def _get_flag_value(flag, default):
     """Return the value following a flag (e.g. --model mistral), or default if not passed."""
@@ -106,6 +196,7 @@ TEXT_HISTORY_TURNS  = 2     # Number of previous exchanges to include in text mo
 VOICE_HISTORY_TURNS = 1     # Number of previous exchanges to include in voice mode (0 = disabled)
 MAX_RESPONSE_TOKENS      = 160   # Max tokens for voice responses (Ollama's num_predict)
 MAX_TEXT_RESPONSE_TOKENS = 800   # Max tokens for text/streaming responses
+MIN_RECORDING_SECONDS    = 0.8   # Discard recordings shorter than this (accidental taps)
 
 SERPAPI_KEY        = os.getenv("SERPAPI_KEY", "")
 ELEVENLABS_KEY     = os.getenv("ELEVENLABS_API_KEY", "")
@@ -207,31 +298,28 @@ def check_ollama():
 def warm_up_ollama():
     """Send a throwaway request so Ollama loads the model into memory now,
     instead of making the first real query pay the cold-load cost."""
-    success = True
+    print(f"  Warming up {OLLAMA_MODEL}...")
     err = None
-    with console.status(f"[cyan]Warming up {OLLAMA_MODEL}... (this can take a minute on first load)[/cyan]"):
-        try:
-            requests.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "stream": False,
-                    "think": OLLAMA_THINK,
-                    "keep_alive": OLLAMA_KEEP_ALIVE,
-                    "options": {"num_predict": 1},
-                },
-                timeout=120
-            )
-        except Exception as e:
-            success = False
-            err = e
-    if success:
+    try:
+        requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+                "think": OLLAMA_THINK,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
+                "options": {"num_predict": 1},
+            },
+            timeout=120
+        )
+    except Exception as e:
+        err = e
+    if not err:
         print(f"  {C.GREEN}✓ {OLLAMA_MODEL} ready{C.RESET}")
     else:
-        print(f"  {C.YELLOW}! Warm-up failed, Friday will still run but the first response may be slow{C.RESET}")
-        if DEV_MODE:
-            print(f"[ERROR] Warm-up failed: {err}")
+        print(f"  {C.YELLOW}! Warm-up failed — first response may be slow{C.RESET}")
+        dev_log(f"Warm-up error: {err}")
 
 
 def transcribe_audio(wav_path):
@@ -294,8 +382,6 @@ def web_search(query):
 # Case 3: Named entity + state verb
 #   A capitalised word (proper noun) followed by a present-tense state verb
 #   suggests the user wants current information about a specific entity.
-
-import re
 
 _TIME_ANCHORS = {
     "today", "right now", "currently", "at the moment", "latest", "recent",
@@ -676,9 +762,7 @@ def process_voice(wav_path):
     Process a voice recording and return audio bytes.
     Replaces the /process Flask route.
     """
-    if DEV_MODE:
-        print("\n" + "="*50)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Voice command...")
+    dev_log(f"Voice command received")
 
     user_query = transcribe_audio(wav_path)
     if not user_query:
@@ -686,19 +770,16 @@ def process_voice(wav_path):
 
     search_query = get_search_query(user_query)
     if search_query:
-        with console.status("[cyan]Searching the web...[/cyan]"):
-            search_results = web_search(search_query)
+        search_results = web_search(search_query)
     else:
         search_results = []
 
-    with console.status("[cyan]Thinking...[/cyan]"):
-        response_text = generate_response(
-            user_query, search_results, SYSTEM_PROMPT_VOICE,
-            use_history=True, max_turns=VOICE_HISTORY_TURNS
-        )
+    response_text = generate_response(
+        user_query, search_results, SYSTEM_PROMPT_VOICE,
+        use_history=True, max_turns=VOICE_HISTORY_TURNS
+    )
 
-    with console.status("[cyan]Generating audio...[/cyan]"):
-        return text_to_speech(response_text)
+    return text_to_speech(response_text)
 
 
 def process_text(user_query):
@@ -706,9 +787,7 @@ def process_text(user_query):
     Process a text query and return a response string.
     Replaces the /process_text Flask route.
     """
-    if DEV_MODE:
-        print("\n" + "="*50)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Text query...")
+    dev_log("Text query received")
 
     search_query = get_search_query(user_query)
     search_results = web_search(search_query) if search_query else []
@@ -754,7 +833,7 @@ class Friday:
         print(f"TTS:     {tts_status}")
         search_status = "Disabled (--no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
         print(f"Search:  {search_status}")
-        flags = [f for f, v in [("dev", DEV_MODE), ("local-tts", LOCAL_TTS), ("no-search", NO_SEARCH), ("voice", VOICE_TEXT)] if v]
+        flags = [f for f, v in [("dev", DEV_MODE), ("text", TEXT_MODE), ("local-tts", LOCAL_TTS), ("no-search", NO_SEARCH)] if v]
         if flags:
             print(f"Flags:   {', '.join('--' + f for f in flags)}")
         print("\nPress Enter to activate.\n")
@@ -1044,26 +1123,19 @@ class Friday:
 
         search_query = get_search_query(text)
         if search_query:
-            with console.status("[cyan]Searching the web...[/cyan]"):
-                search_results = web_search(search_query)
+            search_results = web_search(search_query)
         else:
             search_results = []
-
-        thinking_status = console.status("[cyan]Thinking...[/cyan]")
-        thinking_status.start()
 
         try:
             friday_label_printed = False
             for token in generate_response_stream(text, search_results):
                 if stop_event.is_set():
                     elapsed = time.time() - t_start
-                    if not friday_label_printed:
-                        thinking_status.stop()
                     print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
                     stopped_early = True
                     break
                 if not friday_label_printed:
-                    thinking_status.stop()
                     print("\nFriday: ", end="", flush=True)
                     friday_label_printed = True
                 print(token, end="", flush=True)
@@ -1074,19 +1146,7 @@ class Friday:
         except Exception as e:
             print(f"\n  {C.YELLOW}[!!] Stream error: {e}{C.RESET}")
         finally:
-            thinking_status.stop()
             stream_done.set()
-
-        # --voice flag: play the response as audio after streaming
-        if VOICE_TEXT and full_response and not stopped_early:
-            response_text = "".join(full_response)
-            with console.status("[cyan]Generating audio...[/cyan]"):
-                audio_bytes = text_to_speech(response_text)
-            if audio_bytes:
-                t_voice_start = time.time()
-                threading.Thread(
-                    target=self._play_audio, args=(audio_bytes, t_voice_start), daemon=True
-                ).start()
 
     # ── Main Loop ─────────────────────────────────────────────────
 
