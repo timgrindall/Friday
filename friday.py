@@ -780,10 +780,10 @@ def tts_local(text):
 
 def process_voice(wav_path):
     """
-    Process a voice recording and return audio bytes.
-    Replaces the /process Flask route.
+    Full voice pipeline: transcribe → search → LLM → TTS.
+    Status line is updated throughout so the UI stays in sync.
     """
-    dev_log(f"Voice command received")
+    dev_log("Voice command received")
 
     user_query = transcribe_audio(wav_path)
     if not user_query:
@@ -791,15 +791,18 @@ def process_voice(wav_path):
 
     search_query = get_search_query(user_query)
     if search_query:
+        status.set("Searching...", spinner=True)
         search_results = web_search(search_query)
     else:
         search_results = []
 
+    status.set("Thinking...", spinner=True)
     response_text = generate_response(
         user_query, search_results, SYSTEM_PROMPT_VOICE,
         use_history=True, max_turns=VOICE_HISTORY_TURNS
     )
 
+    status.set("Generating audio...", spinner=True)
     return text_to_speech(response_text)
 
 
@@ -878,12 +881,11 @@ class Friday:
     def start_recording(self):
         if self.recording:
             return
-        import time
         self.recording = True
         self.audio_frames = []
         self._recording_started_at = time.time()
 
-        def callback(indata, frames, time_info, status):
+        def callback(indata, frames, time_info, status_flag):
             if self.recording and (time.time() - self._recording_started_at) >= self.RECORDING_WARMUP_SECONDS:
                 self.audio_frames.append(indata.copy())
 
@@ -894,13 +896,11 @@ class Friday:
         )
         self.stream.start()
 
-        def _print_speak_now():
-            # Only print if we're still recording — avoids a stale "speak now"
-            # message appearing after a very quick tap-and-release already stopped it
+        def _set_recording_status():
             if self.recording:
-                print(f"  {C.GREEN}🎤 Recording — speak now{C.RESET}")
+                status.set("● Recording...")
 
-        self._speak_now_timer = threading.Timer(self.RECORDING_WARMUP_SECONDS, _print_speak_now)
+        self._speak_now_timer = threading.Timer(self.RECORDING_WARMUP_SECONDS, _set_recording_status)
         self._speak_now_timer.daemon = True
         self._speak_now_timer.start()
 
@@ -913,15 +913,22 @@ class Friday:
         try:
             self.stream.stop()
             self.stream.close()
+
             if not self.audio_frames:
-                if DEV_MODE:
-                    print(f"  {C.YELLOW}[DEBUG] 0 audio frames captured — hold was shorter than the {self.RECORDING_WARMUP_SECONDS}s warmup window, or the device never started{C.RESET}")
+                dev_log(f"0 frames captured — hold shorter than {self.RECORDING_WARMUP_SECONDS}s warmup")
+                status.set("Ready")
                 return None
+
             audio_data = np.concatenate(self.audio_frames, axis=0)
-            if DEV_MODE:
-                duration_s = len(audio_data) / self.RATE
-                print(f"  {C.YELLOW}[DEBUG] Captured {duration_s:.2f}s of audio ({len(self.audio_frames)} chunks, {len(audio_data)} samples){C.RESET}")
-            # Prepend 1000ms of silence so Whisper doesn't mishear the first words
+            duration_s = len(audio_data) / self.RATE
+            dev_log(f"Captured {duration_s:.2f}s of audio ({len(self.audio_frames)} chunks)")
+
+            if duration_s < MIN_RECORDING_SECONDS:
+                dev_log(f"Too short ({duration_s:.2f}s < {MIN_RECORDING_SECONDS}s) — discarded")
+                status.set("Ready")
+                return None
+
+            # Prepend 1s of silence so Whisper doesn't mishear the first words
             silence = np.zeros((int(self.RATE * 1.0), self.CHANNELS), dtype=np.int16)
             audio_data = np.concatenate([silence, audio_data])
             with wave.open(self.INPUT_FILE, 'wb') as wf:
@@ -929,11 +936,11 @@ class Friday:
                 wf.setsampwidth(2)
                 wf.setframerate(self.RATE)
                 wf.writeframes(audio_data.tobytes())
-            if DEV_MODE:
-                print("[OK] Recording saved")
+            dev_log("Recording saved")
             return self.INPUT_FILE
+
         except Exception as e:
-            print(f"[ERROR] Recording failed: {e}")
+            dev_log(f"Recording save failed: {e}")
             return None
 
     def _suppress_echo(self):
@@ -987,13 +994,12 @@ class Friday:
             self._voice_enter()
 
     def _voice_pynput(self):
-        import time
         import msvcrt
         while msvcrt.kbhit():
             msvcrt.getwch()
         time.sleep(0.1)
         self._suppress_echo()
-        print("Hold SPACE to record, release to send. ESC to cancel.\n")
+
         space_released = threading.Event()
         cancelled = threading.Event()
 
@@ -1019,12 +1025,15 @@ class Friday:
 
         if cancelled.is_set():
             self._cancel_recording()
-            print("Cancelled.\n")
+            status.set("Ready")
+            self.playback_done.set()
             return
 
         wav_file = self.stop_recording()
         if wav_file:
             threading.Thread(target=self._handle_voice, args=(wav_file,), daemon=True).start()
+        else:
+            self.playback_done.set()
 
     def _drain_stdin(self):
         """Flush any buffered input before the next prompt."""
@@ -1032,42 +1041,41 @@ class Friday:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
 
     def _voice_enter(self):
-        print("Press Enter to start recording.\n")
         input()
         self._drain_stdin()
         self.start_recording()
-        print("Press Enter to send.\n")
         input()
         self._drain_stdin()
         wav_file = self.stop_recording()
         if wav_file:
             threading.Thread(target=self._handle_voice, args=(wav_file,), daemon=True).start()
+        else:
+            self.playback_done.set()
 
     def _handle_voice(self, wav_file):
         """Call process_voice() directly and play the result."""
-        import time
         t_start = time.time()
         try:
             audio_bytes = process_voice(wav_file)
             if audio_bytes:
-                elapsed = time.time() - t_start
-                print(f"\n  {C.GREEN}✓ Response ready ({elapsed:.1f}s){C.RESET}")
                 self._play_audio(audio_bytes, t_start)
             else:
-                print(f"  {C.YELLOW}[!!] No response generated{C.RESET}")
+                dev_log("No audio generated")
+                status.set("Ready")
+                self.playback_done.set()
         except Exception as e:
-            print(f"  {C.YELLOW}[!!] Error: {e}{C.RESET}")
+            dev_log(f"Voice processing error: {e}")
+            status.set("Ready")
+            self.playback_done.set()
 
     def _play_audio(self, audio_bytes, t_start=None):
-        import time
         if not audio_bytes:
             self.playback_done.set()
             return
         try:
             with open(self.OUTPUT_FILE, 'wb') as f:
                 f.write(audio_bytes)
-            if DEV_MODE:
-                print("[>>] Playing response...\n")
+            status.set("♪ Playing...")
             with wave.open(self.OUTPUT_FILE, 'rb') as wf:
                 framerate = wf.getframerate()
                 audio_data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
@@ -1076,10 +1084,12 @@ class Friday:
                 sd.play(audio_data, samplerate=framerate)
                 sd.wait()
             if t_start:
-                print(f"  {C.GREEN}✓ Playback complete ({time.time() - t_start:.1f}s total){C.RESET}")
-                print(f"  Press Enter to record again.\n")
+                status.finish(time.time() - t_start)
+            else:
+                status.set("Ready")
         except Exception as e:
-            print(f"  {C.YELLOW}[ERROR] Playback failed: {e}{C.RESET}\n")
+            dev_log(f"Playback failed: {e}")
+            status.set("Ready")
         finally:
             self.playback_done.set()
 
