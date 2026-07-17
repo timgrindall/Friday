@@ -281,9 +281,8 @@ conversation_history = load_history()
 
 # ── Core Pipeline ─────────────────────────────────────────────────
 
-print("[FRIDAY] Loading Whisper...") if DEV_MODE else None
-whisper_model = whisper.load_model("base")
-print("[FRIDAY] Whisper ready") if DEV_MODE else None
+# Whisper is loaded in __main__ so we can show a spinner during startup
+whisper_model = None
 
 
 def check_ollama():
@@ -298,7 +297,7 @@ def check_ollama():
 def warm_up_ollama():
     """Send a throwaway request so Ollama loads the model into memory now,
     instead of making the first real query pay the cold-load cost."""
-    print(f"  Warming up {OLLAMA_MODEL}...")
+    status.set(f"Loading {OLLAMA_MODEL}...", spinner=True)
     err = None
     try:
         requests.post(
@@ -315,11 +314,33 @@ def warm_up_ollama():
         )
     except Exception as e:
         err = e
+    status.clear()
     if not err:
-        print(f"  {C.GREEN}✓ {OLLAMA_MODEL} ready{C.RESET}")
+        dev_log(f"{OLLAMA_MODEL} ready")
     else:
-        print(f"  {C.YELLOW}! Warm-up failed — first response may be slow{C.RESET}")
-        dev_log(f"Warm-up error: {err}")
+        dev_log(f"Warm-up failed (first response may be slow): {err}")
+
+
+def _show_banner():
+    """Print the minimal startup banner, hold 3 s, then clear and hand off to Ready."""
+    tts = "ElevenLabs" if (ELEVENLABS_KEY and is_online() and not LOCAL_TTS) else \
+          ("Piper" if can_use_piper() else "pyttsx3")
+
+    status.clear()
+    print(f"\n  Friday  ·  {OLLAMA_MODEL}  ·  {tts}")
+    if DEV_MODE:
+        active = [f"--{f}" for f, v in [
+            ("dev", DEV_MODE), ("text", TEXT_MODE),
+            ("local-tts", LOCAL_TTS), ("no-search", NO_SEARCH),
+        ] if v]
+        if active:
+            print(f"  {C.DIM}{' '.join(active)}{C.RESET}")
+    print()
+
+    time.sleep(3)
+
+    if not DEV_MODE:
+        _clear_screen()
 
 
 def transcribe_audio(wav_path):
@@ -1220,16 +1241,28 @@ if __name__ == "__main__":
             print("\n  Run: python setup.py")
             sys.exit(0)
 
-    # Confirm Ollama is reachable before loading the UI
+    # Confirm Ollama is reachable before loading anything heavy
     if not check_ollama():
         print(f"\n{C.YELLOW}  ! Cannot reach Ollama.{C.RESET}")
         print(f"  Make sure it's running with: ollama serve\n")
         sys.exit(1)
 
+    # Load Whisper with spinner
+    status.set("Loading Whisper...", spinner=True)
+    whisper_model = whisper.load_model("base")
+    status.clear()
+    dev_log("Whisper ready")
+
+    # Load Ollama model with spinner
     warm_up_ollama()
+
+    # Banner → 3 s → clear → Ready
+    _show_banner()
+    status.set("Ready")
 
     friday = Friday()
     try:
         friday.run()
     except KeyboardInterrupt:
-        print("\nShutting down Friday...")
+        print("\n  Goodbye.\n")
+        sys.exit(0)
