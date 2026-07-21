@@ -674,7 +674,7 @@ def tts_elevenlabs(text):
         headers = {"xi-api-key": ELEVENLABS_KEY, "Content-Type": "application/json"}
         payload = {
             "text": text,
-            "model_id": "eleven_monolingual_v1",
+            "model_id": "eleven_flash_v2_5",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
         }
         response = requests.post(url, headers=headers, json=payload, timeout=30)
