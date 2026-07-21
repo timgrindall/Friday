@@ -27,7 +27,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Rename --offline-tts flag to --local-tts
 # [x] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
 # [ ] Fix general bugginess in the text interface
-# [~] Experiment (new branch): minimalist voice UI — single-line overwriting status,
+# [x] Experiment (new branch): minimalist voice UI — single-line overwriting status,
 #     spinner + "Thinking..." during LLM wait, elapsed time on completion; --text flag
 #     for text mode; no standby; Ctrl+C to exit (in progress on Friday-ver-3)
 # ─────────────────────────────────────────────────────────────────
@@ -826,55 +826,16 @@ def process_text(user_query):
 
 class Friday:
     def __init__(self):
-        self.recording = False
+        self.recording  = False
         self.audio_frames = []
-        self.active = False
-        self.running = False
+        self.running    = False
         self.playback_done = threading.Event()
 
         self.CHANNELS = 1
         self.RATE = 16000
-        self.INPUT_FILE = AUDIO_INPUT
+        self.INPUT_FILE  = AUDIO_INPUT
         self.OUTPUT_FILE = AUDIO_OUTPUT
-        self.RECORDING_WARMUP_SECONDS = 1.25  # Discard audio captured in this window after
-                                                # start_recording() — gives the device time to
-                                                # stabilize so early speech isn't lost
-
-    def _print_banner(self):
-        print(f"\n{C.GREEN}" + "="*50)
-        print("FRIDAY - STANDBY")
-        print("="*50 + f"{C.RESET}")
-        print(f"Model:   {OLLAMA_MODEL}")
-        print(f"Memory:  {MEMORY_FILE}")
-        if ELEVENLABS_KEY and is_online() and not LOCAL_TTS:
-            tts_status = "ElevenLabs"
-        elif can_use_piper():
-            tts_status = f"Piper ({PIPER_VOICE})"
-        else:
-            tts_status = "pyttsx3 (local)"
-        if LOCAL_TTS:
-            tts_status += " (--local-tts)"
-        print(f"TTS:     {tts_status}")
-        search_status = "Disabled (--no-search)" if NO_SEARCH else ("SerpAPI" if SERPAPI_KEY else "Disabled")
-        print(f"Search:  {search_status}")
-        flags = [f for f, v in [("dev", DEV_MODE), ("text", TEXT_MODE), ("local-tts", LOCAL_TTS), ("no-search", NO_SEARCH)] if v]
-        if flags:
-            print(f"Flags:   {', '.join('--' + f for f in flags)}")
-        print("\nPress Enter to activate.\n")
-
-    def _print_active(self):
-        print(f"\n{C.GREEN}" + "="*50)
-        print("FRIDAY - ACTIVE")
-        print("="*50 + f"{C.RESET}")
-        voice_hint = "hold SPACE to record, release to send" if sys.platform == 'win32' else "Enter to start, Enter to send"
-        print(f"\n  Enter      - Voice ({voice_hint})")
-        if DEV_MODE:
-            print("  T + Enter  - Text query")
-        print("  quit       - Exit\n")
-
-    def _go_standby(self):
-        self.active = False
-        print("\n[Standby] Press Enter to activate.\n")
+        self.RECORDING_WARMUP_SECONDS = 1.25
 
     # ── Voice ─────────────────────────────────────────────────────
 
@@ -1093,32 +1054,31 @@ class Friday:
         finally:
             self.playback_done.set()
 
-    # ── Text (dev mode only) ──────────────────────────────────────
+    # ── Text ──────────────────────────────────────────────────────
 
     def do_text_session(self):
-        print(f"Text mode. Blank line to exit. Press {C.YELLOW}ESC{C.RESET} to interrupt a response.\n")
+        """Text input loop — active when --text flag is set. 'quit' or Ctrl+C to exit."""
         while True:
-            print("> ", end="", flush=True)
             try:
-                text = input().strip()
+                text = input("\n  > ").strip()
             except (EOFError, KeyboardInterrupt):
-                print()
-                return
+                raise
             if not text:
-                return
+                continue
+            if text.lower() == "quit":
+                if not DEV_MODE:
+                    _clear_screen()
+                print("\n  Goodbye.\n")
+                sys.exit(0)
             try:
                 self._stream_text_response(text)
             except KeyboardInterrupt:
-                print()
-                return
-            except Exception as e:
-                print(f"[!!] Error: {e}")
+                raise
 
     def _stream_text_response(self, text):
-        """Stream response tokens directly from generate_response_stream().
-        Press ESC to cut off mid-stream. If --voice flag is set, also plays audio after."""
-        import time
-        stop_event = threading.Event()
+        """Stream response tokens to terminal. ESC to cut off mid-stream.
+        After completion: pause briefly, clear screen, reset to Ready."""
+        stop_event  = threading.Event()
         stream_done = threading.Event()
         full_response = []
 
@@ -1130,8 +1090,7 @@ class Friday:
                     import msvcrt
                     while not stream_done.is_set():
                         if msvcrt.kbhit():
-                            ch = msvcrt.getwch()
-                            if ch == '\x1b':
+                            if msvcrt.getwch() == '\x1b':
                                 stop_event.set()
                                 return
                 else:
@@ -1146,94 +1105,87 @@ class Friday:
             except (EOFError, KeyboardInterrupt):
                 stop_event.set()
 
-        watcher = threading.Thread(target=watch_for_esc, daemon=True)
-        watcher.start()
+        threading.Thread(target=watch_for_esc, daemon=True).start()
 
         t_start = time.time()
         stopped_early = False
 
         search_query = get_search_query(text)
         if search_query:
+            status.set("Searching...", spinner=True)
             search_results = web_search(search_query)
         else:
             search_results = []
 
+        status.set("Thinking...", spinner=True)
+
         try:
-            friday_label_printed = False
+            first_token = True
             for token in generate_response_stream(text, search_results):
                 if stop_event.is_set():
                     elapsed = time.time() - t_start
                     print(f" {C.YELLOW}[stopped at {elapsed:.1f}s]{C.RESET}")
                     stopped_early = True
                     break
-                if not friday_label_printed:
-                    print("\nFriday: ", end="", flush=True)
-                    friday_label_printed = True
+                if first_token:
+                    status.clear()
+                    print(f"\n  Friday: ", end="", flush=True)
+                    first_token = False
                 print(token, end="", flush=True)
                 full_response.append(token)
             else:
                 elapsed = time.time() - t_start
-                print(f"\n\n  {C.GREEN}✓ Done ({elapsed:.1f}s){C.RESET}\n")
+                print(f"\n\n  {C.GREEN}✓ {elapsed:.1f}s{C.RESET}")
         except Exception as e:
-            print(f"\n  {C.YELLOW}[!!] Stream error: {e}{C.RESET}")
+            dev_log(f"Stream error: {e}")
         finally:
             stream_done.set()
+
+        if not stopped_early and full_response:
+            time.sleep(1.5)
+            if not DEV_MODE:
+                _clear_screen()
+            status.set("Ready")
 
     # ── Main Loop ─────────────────────────────────────────────────
 
     def _voice_loop(self):
-        """Continuous voice loop — runs in background thread."""
+        """Continuous voice loop — runs in a background thread."""
         while self.running:
             self.playback_done.clear()
             self.do_voice_session()
             self.playback_done.wait()
 
-    def _start_voice_loop(self):
-        """Start the voice loop and watch stdin for commands."""
+    def _run_voice(self):
+        """Start the voice loop. Main thread sleeps; Ctrl+C to exit."""
         self.running = True
+        voice_thread = threading.Thread(target=self._voice_loop, daemon=True)
+        voice_thread.start()
+        try:
+            while self.running:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.running = False
+            if not DEV_MODE:
+                _clear_screen()
+            print("\n  Goodbye.\n")
+            sys.exit(0)
 
-        if not DEV_MODE:
-            voice_thread = threading.Thread(target=self._voice_loop, daemon=True)
-            voice_thread.start()
-        else:
-            voice_thread = None
-
-        while self.running:
-            cmd = input().strip().lower()
-            if cmd == "quit":
-                self.running = False
-                print("Goodbye.")
-                sys.exit(0)
-            elif cmd in ("v", "") and DEV_MODE:
-                self.do_voice_session()
-            elif cmd == "t" and DEV_MODE:
-                if voice_thread and voice_thread.is_alive():
-                    self.running = False
-                    voice_thread.join(timeout=2)
-                self.do_text_session()
-                self._print_active()
-                self.running = True
+    def _run_text(self):
+        """Text input mode. 'quit' or Ctrl+C to exit."""
+        try:
+            self.do_text_session()
+        except KeyboardInterrupt:
+            if not DEV_MODE:
+                _clear_screen()
+            print("\n  Goodbye.\n")
+            sys.exit(0)
 
     def run(self):
-        self._print_banner()
-        if sys.platform == 'win32':
-            import msvcrt
-            while msvcrt.kbhit():
-                msvcrt.getwch()
-        while True:
-            cmd = input().strip().lower()
-
-            if cmd == "quit":
-                print("Goodbye.")
-                sys.exit(0)
-
-            if not self.active:
-                if cmd == "":
-                    self.active = True
-                    if DEV_MODE:
-                        self._print_active()
-                    self._start_voice_loop()
-                continue
+        if TEXT_MODE:
+            self._run_text()
+        else:
+            self._run_voice()
 
 
 # ── Entry Point ───────────────────────────────────────────────────
