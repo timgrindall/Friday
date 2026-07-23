@@ -1294,7 +1294,7 @@ if __name__ == "__main__":
 
     # Banner → 3 s → clear → Ready
     _show_banner()
-    status.set("Ready to listen...")
+    status.set("Ready..." if TEXT_MODE else "Ready to listen...")
 
     friday = Friday()
     try:
