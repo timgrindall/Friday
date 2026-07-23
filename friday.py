@@ -396,8 +396,12 @@ def _show_banner():
     tts = "ElevenLabs" if (ELEVENLABS_KEY and is_online() and not LOCAL_TTS) else \
           ("Piper" if can_use_piper() else "pyttsx3")
 
+    msg_count  = len(conversation_history)
+    memory_str = f"{msg_count} messages in memory" if msg_count else "no memory yet"
+
     status.clear()
     print(f"\n  Friday  ·  {OLLAMA_MODEL}  ·  {tts}")
+    print(f"  {C.DIM}{memory_str}{C.RESET}")
     if DEV_MODE:
         active = [f"--{f}" for f, v in [
             ("dev", DEV_MODE), ("text", TEXT_MODE),
@@ -1215,7 +1219,7 @@ class Friday:
             time.sleep(1.5)
             if not DEV_MODE:
                 _clear_screen()
-            status.set("Ready to listen...")
+            status.set("Ready...")
 
     # ── Main Loop ─────────────────────────────────────────────────
 
