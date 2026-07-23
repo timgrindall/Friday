@@ -2,6 +2,50 @@
 
 ---
 
+## v1.2 (branch: version-3)
+Complete UI overhaul — minimalist single-line status interface.
+
+**StatusLine**
+- New `StatusLine` class replaces all `rich` console output — uses `\r` to update a single terminal line in place, with an animated braille spinner for async states
+- In `--dev` mode degrades gracefully to plain `print()` (rolling output)
+- States cycle: `● Recording...` → `⠋ Thinking...` → `♪ Playing...` → `✓ Xs` (3 s) → `Ready`
+- `finish(elapsed)` shows elapsed time then auto-transitions to `Ready` after 3 s
+- `dev_log()` replaces all `if DEV_MODE: print(...)` blocks — muted dim colour, no-op in normal mode
+- Removed `rich` dependency from codebase
+
+**Boot sequence**
+- Whisper now loads lazily in `__main__` behind a spinner (`Loading Whisper...`) rather than silently at module level
+- `warm_up_ollama()` shows a spinner during model load
+- Minimal banner (`Friday · model · TTS provider`) displays for 3 s then screen clears to `Ready`
+- In `--dev` mode screen is not cleared so warmup logs remain visible
+
+**Voice mode**
+- `start_recording()` sets `● Recording...` after the warmup window via timer (not a print)
+- `stop_recording()` adds minimum recording length check (`MIN_RECORDING_SECONDS = 0.8`) — accidental taps are silently discarded and status resets to `Ready`
+- `process_voice()` drives status through `Searching...` → `Thinking...` → `Generating audio...` spinners
+- `_play_audio()` sets `♪ Playing...` then calls `status.finish(elapsed)` on completion
+- Cancelled or too-short recordings correctly signal `playback_done` so the voice loop continues
+
+**Text mode**
+- `--text` flag replaces `--dev` as the way to enter text mode (dev is now logging only)
+- `_stream_text_response()` shows `Searching...` / `Thinking...` spinners before first token, clears status line cleanly when streaming begins
+- Screen clears 1.5 s after a complete response and resets to `Ready`
+- `quit` or Ctrl+C to exit; blank line no longer exits text mode
+
+**Focus detection**
+- Global pynput listener now ignores spacebar presses when the terminal is not the foreground window
+- Works with both classic PowerShell and Windows Terminal (walks process ancestor tree via `CreateToolhelp32Snapshot` — no new dependencies)
+- Non-Windows always returns `True`
+
+**Other fixes**
+- ElevenLabs model updated from deprecated `eleven_monolingual_v1` to `eleven_flash_v2_5`
+- Standby mode removed — `run()` now branches directly to `_run_voice()` or `_run_text()`
+- `_print_banner()`, `_print_active()`, `_go_standby()`, `_start_voice_loop()` removed
+- `VOICE_TEXT` / `--voice` flag removed
+- `re` and `time` moved to top-level imports; duplicate `import re` in search heuristics removed
+
+---
+
 ## v1.1
 Replaced all hand-rolled terminal status printing with `rich` animated spinners.
 

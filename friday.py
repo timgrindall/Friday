@@ -76,6 +76,75 @@ class C:
     RESET  = "\033[0m"
 
 
+# ── Focus Detection (Windows) ─────────────────────────────────────
+
+if sys.platform == 'win32':
+    import ctypes
+    import ctypes.wintypes
+
+    _TH32CS_SNAPPROCESS = 0x00000002
+
+    class _PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize",              ctypes.wintypes.DWORD),
+            ("cntUsage",            ctypes.wintypes.DWORD),
+            ("th32ProcessID",       ctypes.wintypes.DWORD),
+            ("th32DefaultHeapID",   ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID",        ctypes.wintypes.DWORD),
+            ("cntThreads",          ctypes.wintypes.DWORD),
+            ("th32ParentProcessID", ctypes.wintypes.DWORD),
+            ("pcPriClassBase",      ctypes.c_long),
+            ("dwFlags",             ctypes.wintypes.DWORD),
+            ("szExeFile",           ctypes.c_char * 260),
+        ]
+
+    def _build_parent_map():
+        """Return {pid: parent_pid} for all running processes."""
+        k = ctypes.windll.kernel32
+        snap = k.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if snap == ctypes.wintypes.HANDLE(-1).value:
+            return {}
+        entry = _PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+        parent_map = {}
+        try:
+            if k.Process32First(snap, ctypes.byref(entry)):
+                while True:
+                    parent_map[entry.th32ProcessID] = entry.th32ParentProcessID
+                    if not k.Process32Next(snap, ctypes.byref(entry)):
+                        break
+        finally:
+            k.CloseHandle(snap)
+        return parent_map
+
+    def _foreground_pid():
+        u = ctypes.windll.user32
+        pid = ctypes.wintypes.DWORD(0)
+        u.GetWindowThreadProcessId(u.GetForegroundWindow(), ctypes.byref(pid))
+        return pid.value
+
+    def is_console_focused():
+        """
+        True if the foreground window belongs to this process or any ancestor.
+        Handles both classic PowerShell windows and Windows Terminal tabs.
+        """
+        fg   = _foreground_pid()
+        pm   = _build_parent_map()
+        pid  = os.getpid()
+        seen = set()
+        while pid and pid not in seen:
+            if pid == fg:
+                return True
+            seen.add(pid)
+            pid = pm.get(pid)
+        return False
+
+else:
+    def is_console_focused():
+        """Non-Windows: always True (focus check not needed)."""
+        return True
+
+
 # ── Status Line ───────────────────────────────────────────────────
 
 class StatusLine:
@@ -966,7 +1035,7 @@ class Friday:
 
         def on_press(key):
             if key == keyboard.Key.space:
-                if not self.recording:
+                if not self.recording and is_console_focused():
                     self.start_recording()
             elif key == keyboard.Key.esc:
                 cancelled.set()
