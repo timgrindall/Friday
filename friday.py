@@ -180,9 +180,9 @@ class StatusLine:
             self._draw(text)
 
     def finish(self, elapsed):
-        """Show '✓  X.Xs' for 3 s then reset to 'Ready'."""
+        """Show '✓  X.Xs' for 3 s then reset to 'Ready to listen...'."""
         self.set(f"✓  {elapsed:.1f}s")
-        t = threading.Timer(3.0, lambda: self.set("Ready"))
+        t = threading.Timer(3.0, lambda: self.set("Ready to listen..."))
         t.daemon = True
         t.start()
 
@@ -197,7 +197,8 @@ class StatusLine:
     # ── Internal ──────────────────────────────────────────────────
 
     def _draw(self, content):
-        sys.stdout.write(f"\r  {content:<{self._W - 2}}")
+        line = f"  {content}"
+        sys.stdout.write(f"\r{line:<{self._W}}\r{line}")
         sys.stdout.flush()
 
     def _tick(self):
@@ -946,7 +947,7 @@ class Friday:
 
             if not self.audio_frames:
                 dev_log(f"0 frames captured — hold shorter than {self.RECORDING_WARMUP_SECONDS}s warmup")
-                status.set("Ready")
+                status.set("Ready to listen...")
                 return None
 
             audio_data = np.concatenate(self.audio_frames, axis=0)
@@ -955,7 +956,7 @@ class Friday:
 
             if duration_s < MIN_RECORDING_SECONDS:
                 dev_log(f"Too short ({duration_s:.2f}s < {MIN_RECORDING_SECONDS}s) — discarded")
-                status.set("Ready")
+                status.set("Ready to listen...")
                 return None
 
             # Prepend 1s of silence so Whisper doesn't mishear the first words
@@ -1055,7 +1056,7 @@ class Friday:
 
         if cancelled.is_set():
             self._cancel_recording()
-            status.set("Ready")
+            status.set("Ready to listen...")
             self.playback_done.set()
             return
 
@@ -1091,11 +1092,11 @@ class Friday:
                 self._play_audio(audio_bytes, t_start)
             else:
                 dev_log("No audio generated")
-                status.set("Ready")
+                status.set("Ready to listen...")
                 self.playback_done.set()
         except Exception as e:
             dev_log(f"Voice processing error: {e}")
-            status.set("Ready")
+            status.set("Ready to listen...")
             self.playback_done.set()
 
     def _play_audio(self, audio_bytes, t_start=None):
@@ -1116,10 +1117,10 @@ class Friday:
             if t_start:
                 status.finish(time.time() - t_start)
             else:
-                status.set("Ready")
+                status.set("Ready to listen...")
         except Exception as e:
             dev_log(f"Playback failed: {e}")
-            status.set("Ready")
+            status.set("Ready to listen...")
         finally:
             self.playback_done.set()
 
@@ -1214,7 +1215,7 @@ class Friday:
             time.sleep(1.5)
             if not DEV_MODE:
                 _clear_screen()
-            status.set("Ready")
+            status.set("Ready to listen...")
 
     # ── Main Loop ─────────────────────────────────────────────────
 
@@ -1289,7 +1290,7 @@ if __name__ == "__main__":
 
     # Banner → 3 s → clear → Ready
     _show_banner()
-    status.set("Ready")
+    status.set("Ready to listen...")
 
     friday = Friday()
     try:
