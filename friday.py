@@ -742,6 +742,69 @@ def can_use_piper():
         return False
 
 
+def _piper_voice_dir():
+    """Platform-appropriate directory for Piper voice models."""
+    if sys.platform == 'win32':
+        return os.path.join(os.path.expanduser("~"), "piper", "voices")
+    return os.path.expanduser("~/.local/share/piper/voices")
+
+
+def _piper_model_path():
+    """Full path to the configured Piper .onnx model file."""
+    return os.path.join(_piper_voice_dir(), f"{PIPER_VOICE}.onnx")
+
+
+def _piper_model_url(filename):
+    """Build the Hugging Face download URL for a Piper voice file.
+    e.g. en_US-lessac-medium → .../en/en_US/lessac/medium/en_US-lessac-medium.onnx"""
+    parts = PIPER_VOICE.split("-")
+    if len(parts) < 3:
+        return None
+    region, name, quality = parts[0], parts[1], parts[2]
+    lang = region.split("_")[0]
+    base = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang}/{region}/{name}/{quality}"
+    return f"{base}/{filename}"
+
+
+def _ensure_piper_model():
+    """Download Piper voice model files at boot if not already present.
+    Shows a spinner — called from __main__ before the banner."""
+    model_path  = _piper_model_path()
+    config_path = model_path + ".json"
+
+    if os.path.exists(model_path) and os.path.exists(config_path):
+        dev_log(f"Piper model found: {model_path}")
+        return
+
+    status.set(f"Downloading Piper voice ({PIPER_VOICE})...", spinner=True)
+    dev_log(f"Piper model not found, downloading from Hugging Face...")
+    os.makedirs(_piper_voice_dir(), exist_ok=True)
+
+    for filename in [f"{PIPER_VOICE}.onnx", f"{PIPER_VOICE}.onnx.json"]:
+        dest = os.path.join(_piper_voice_dir(), filename)
+        if os.path.exists(dest):
+            continue
+        url = _piper_model_url(filename)
+        if not url:
+            dev_log(f"Piper: couldn't parse voice name into URL: {PIPER_VOICE}")
+            status.clear()
+            return
+        dev_log(f"Downloading {url}")
+        try:
+            r = requests.get(url, stream=True, timeout=300)
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        except Exception as e:
+            dev_log(f"Piper download failed ({filename}): {e}")
+            status.clear()
+            return
+
+    status.clear()
+    dev_log("Piper model ready")
+
+
 def tts_elevenlabs(text):
     try:
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}?output_format=pcm_16000"
@@ -778,55 +841,35 @@ def tts_elevenlabs(text):
 
 
 def tts_piper(text):
-    """
-    High-quality local TTS using Piper.
-    Requires: pip install piper-tts
-    """
+    """High-quality local TTS using Piper. Model is downloaded at boot via _ensure_piper_model()."""
     try:
         from piper.voice import PiperVoice
-        import subprocess
 
-        voice_dir = os.path.expanduser("~/.local/share/piper/voices")
-        model_file = os.path.join(voice_dir, f"{PIPER_VOICE}.onnx")
+        model_path = _piper_model_path()
+        if not os.path.exists(model_path):
+            dev_log(f"Piper model missing at {model_path}, falling back to pyttsx3")
+            return tts_local(text)
 
-        if not os.path.exists(model_file):
-            if DEV_MODE:
-                print(f"[TTS] Piper model not found at {model_file}, downloading...")
-            os.makedirs(voice_dir, exist_ok=True)
-            try:
-                subprocess.run(
-                    ["piper", "--voice", PIPER_VOICE, "--data-dir", voice_dir],
-                    input=b"test",
-                    capture_output=True,
-                    timeout=60
-                )
-            except Exception as dl_error:
-                if DEV_MODE:
-                    print(f"[TTS] Piper model download failed: {dl_error}")
-                return tts_local(text)
-
-        voice = PiperVoice.load(model_file, use_cuda=False)
+        voice = PiperVoice.load(model_path, use_cuda=False)
         wav_buffer = io.BytesIO()
-
         with wave.open(wav_buffer, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(22050)  # Piper default sample rate
+            wf.setframerate(voice.config.sample_rate)
             for audio_chunk in voice.synthesize(text):
-                wf.writeframes(audio_chunk.tobytes())
+                # piper-tts yields AudioChunk objects with a .audio bytes attribute
+                raw = audio_chunk.audio if hasattr(audio_chunk, 'audio') else bytes(audio_chunk)
+                wf.writeframes(raw)
 
         audio_bytes = wav_buffer.getvalue()
-        if DEV_MODE:
-            print(f"[TTS] Piper ({PIPER_VOICE}, {len(audio_bytes)} bytes)")
+        dev_log(f"TTS: Piper ({PIPER_VOICE}, {len(audio_bytes)} bytes)")
         return audio_bytes
 
     except ImportError:
-        if DEV_MODE:
-            print("[TTS] Piper not installed, falling back to local TTS")
+        dev_log("Piper not installed, falling back to pyttsx3")
         return tts_local(text)
     except Exception as e:
-        if DEV_MODE:
-            print(f"[ERROR] Piper TTS failed: {e}, falling back to local TTS")
+        dev_log(f"Piper TTS failed ({e}), falling back to pyttsx3")
         return tts_local(text)
 
 
@@ -1216,10 +1259,7 @@ class Friday:
             stream_done.set()
 
         if not stopped_early and full_response:
-            time.sleep(1.5)
-            if not DEV_MODE:
-                _clear_screen()
-            status.set("Ready...")
+            pass  # Response stays visible; do_text_session() shows the next prompt
 
     # ── Main Loop ─────────────────────────────────────────────────
 
@@ -1291,6 +1331,10 @@ if __name__ == "__main__":
 
     # Load Ollama model with spinner
     warm_up_ollama()
+
+    # If Piper will be the TTS, ensure model is downloaded before we need it
+    if can_use_piper() and not (ELEVENLABS_KEY and is_online() and not LOCAL_TTS):
+        _ensure_piper_model()
 
     # Banner → 3 s → clear → Ready
     _show_banner()
