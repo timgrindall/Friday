@@ -847,17 +847,17 @@ def tts_piper(text):
 
         voice = PiperVoice.load(model_path, use_cuda=False)
         wav_buffer = io.BytesIO()
+        sample_rate = getattr(getattr(voice, 'config', None), 'sample_rate', 22050)
 
         with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
             try:
-                # Some piper builds: synthesize(text, wav_file) writes directly
+                # Some piper builds: synthesize(text, wav_file) writes frames directly
                 voice.synthesize(text, wf)
             except TypeError:
                 # piper-tts pip package: synthesize(text) yields chunks
-                sample_rate = getattr(getattr(voice, 'config', None), 'sample_rate', 22050)
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
                 for chunk in voice.synthesize(text):
                     raw = None
                     for attr in ('audio', 'audio_bytes', 'data', 'samples'):
