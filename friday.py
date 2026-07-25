@@ -30,6 +30,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Experiment (new branch): minimalist voice UI — single-line overwriting status,
 #     spinner + "Thinking..." during LLM wait, elapsed time on completion; --text flag
 #     for text mode; no standby; Ctrl+C to exit (in progress on Friday-ver-3)
+# [ ] Make sure text mode displays last query and response for each turn
 # ─────────────────────────────────────────────────────────────────
 
 import os
