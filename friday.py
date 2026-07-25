@@ -734,7 +734,7 @@ def text_to_speech(text):
 
 
 def can_use_piper():
-    """Check if piper-tts is installed and available."""
+    """Check if piper-tts is installed."""
     try:
         import piper
         return True
@@ -756,7 +756,7 @@ def _piper_model_path():
 
 def _piper_model_url(filename):
     """Build the Hugging Face download URL for a Piper voice file.
-    e.g. en_US-lessac-medium → .../en/en_US/lessac/medium/en_US-lessac-medium.onnx"""
+    e.g. en_US-lessac-medium → .../en/en_US/lessac/medium/filename"""
     parts = PIPER_VOICE.split("-")
     if len(parts) < 3:
         return None
@@ -767,19 +767,15 @@ def _piper_model_url(filename):
 
 
 def _ensure_piper_model():
-    """Download Piper voice model files at boot if not already present.
-    Shows a spinner — called from __main__ before the banner."""
+    """Download Piper voice model files at boot if not already present."""
     model_path  = _piper_model_path()
     config_path = model_path + ".json"
-
     if os.path.exists(model_path) and os.path.exists(config_path):
         dev_log(f"Piper model found: {model_path}")
         return
-
     status.set(f"Downloading Piper voice ({PIPER_VOICE})...", spinner=True)
-    dev_log(f"Piper model not found, downloading from Hugging Face...")
+    dev_log("Piper model not found, downloading from Hugging Face...")
     os.makedirs(_piper_voice_dir(), exist_ok=True)
-
     for filename in [f"{PIPER_VOICE}.onnx", f"{PIPER_VOICE}.onnx.json"]:
         dest = os.path.join(_piper_voice_dir(), filename)
         if os.path.exists(dest):
@@ -800,7 +796,6 @@ def _ensure_piper_model():
             dev_log(f"Piper download failed ({filename}): {e}")
             status.clear()
             return
-
     status.clear()
     dev_log("Piper model ready")
 
@@ -841,7 +836,7 @@ def tts_elevenlabs(text):
 
 
 def tts_piper(text):
-    """High-quality local TTS using Piper. Model is downloaded at boot via _ensure_piper_model()."""
+    """High-quality local TTS using Piper. Model downloaded at boot via _ensure_piper_model()."""
     try:
         from piper.voice import PiperVoice
 
@@ -852,14 +847,28 @@ def tts_piper(text):
 
         voice = PiperVoice.load(model_path, use_cuda=False)
         wav_buffer = io.BytesIO()
+
         with wave.open(wav_buffer, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(voice.config.sample_rate)
-            for audio_chunk in voice.synthesize(text):
-                # piper-tts yields AudioChunk objects with a .audio bytes attribute
-                raw = audio_chunk.audio if hasattr(audio_chunk, 'audio') else bytes(audio_chunk)
-                wf.writeframes(raw)
+            try:
+                # Some piper builds: synthesize(text, wav_file) writes directly
+                voice.synthesize(text, wf)
+            except TypeError:
+                # piper-tts pip package: synthesize(text) yields chunks
+                sample_rate = getattr(getattr(voice, 'config', None), 'sample_rate', 22050)
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                for chunk in voice.synthesize(text):
+                    raw = None
+                    for attr in ('audio', 'audio_bytes', 'data', 'samples'):
+                        val = getattr(chunk, attr, None)
+                        if val is not None:
+                            raw = val.tobytes() if hasattr(val, 'tobytes') else bytes(val)
+                            break
+                    if raw is None:
+                        dev_log(f"Unknown AudioChunk format — attrs: {[a for a in dir(chunk) if not a.startswith('_')]}")
+                        return tts_local(text)
+                    wf.writeframes(raw)
 
         audio_bytes = wav_buffer.getvalue()
         dev_log(f"TTS: Piper ({PIPER_VOICE}, {len(audio_bytes)} bytes)")
@@ -1259,7 +1268,10 @@ class Friday:
             stream_done.set()
 
         if not stopped_early and full_response:
-            pass  # Response stays visible; do_text_session() shows the next prompt
+            time.sleep(1.5)
+            if not DEV_MODE:
+                _clear_screen()
+            status.set("Ready...")
 
     # ── Main Loop ─────────────────────────────────────────────────
 
