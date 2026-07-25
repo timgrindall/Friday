@@ -276,7 +276,7 @@ ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 # Models: https://github.com/rhasspy/piper/blob/master/VOICES.md
 PIPER_VOICE        = os.getenv("PIPER_VOICE", "en_US-lessac-medium")  # Free, clear, medium quality
 
-AUDIO_DEVICE = 2     # Input device index (None = system default)
+AUDIO_DEVICE = None  # Input device index (None = system default; set to an int to pin a specific device)
                      # Run: python -c "import sounddevice as sd; print(sd.query_devices())"
 
 TEMP_DIR     = tempfile.gettempdir()
@@ -976,12 +976,23 @@ class Friday:
             if self.recording and (time.time() - self._recording_started_at) >= self.RECORDING_WARMUP_SECONDS:
                 self.audio_frames.append(indata.copy())
 
-        self.stream = sd.InputStream(
-            samplerate=self.RATE, channels=self.CHANNELS,
-            dtype='int16', callback=callback,
-            device=AUDIO_DEVICE
-        )
-        self.stream.start()
+        try:
+            self.stream = sd.InputStream(
+                samplerate=self.RATE, channels=self.CHANNELS,
+                dtype='int16', callback=callback,
+                device=AUDIO_DEVICE
+            )
+            self.stream.start()
+        except Exception as e:
+            self.recording = False
+            dev_log(f"Audio device error: {e}")
+            dev_log("Available input devices:")
+            for i, d in enumerate(sd.query_devices()):
+                if d['max_input_channels'] > 0:
+                    dev_log(f"  [{i}] {d['name']} ({d['max_input_channels']}ch)")
+            status.set("Ready to listen...")
+            self.playback_done.set()
+            return
 
         def _set_recording_status():
             if self.recording:
