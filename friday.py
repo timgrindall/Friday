@@ -1249,6 +1249,7 @@ class Friday:
 
         t_start = time.time()
         stopped_early = False
+        elapsed = 0.0
 
         search_query = get_search_query(text)
         if search_query:
@@ -1282,10 +1283,12 @@ class Friday:
             stream_done.set()
 
         if not stopped_early and full_response:
-            time.sleep(1.5)
+            response_text = "".join(full_response)
+            time.sleep(1.0)
             if not DEV_MODE:
                 _clear_screen()
-            status.set("Ready...")
+            print(f"\n  Friday: {response_text}")
+            print(f"\n  {C.GREEN}✓ {elapsed:.1f}s{C.RESET}\n")
 
     # ── Main Loop ─────────────────────────────────────────────────
 
