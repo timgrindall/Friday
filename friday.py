@@ -19,17 +19,10 @@ In text mode, press ESC while a response is streaming to cut it off early.
 
 # ── TODO ─────────────────────────────────────────────────────────
 # [ ] Research and test wake word / wake on voice feature
-# [x] Post-1.0: Remove Flask server/client architecture, replace with direct function calls
-# [x] Note: I do not like the search context feature, way too unpredictable. lets get rid of it.
-# [x] Fix the bug where the first couple words of voice queries got cut off or garbled (fixed via recording warmup window + delayed "speak now" cue)
-# [x] Text mode should always perform a web search; voice mode uses keyword triggers only
-# [x] Integrate setup script into main file, add colors matching friday.py
-# [x] Rename --offline-tts flag to --local-tts
-# [x] Replace hand-rolled \r status-line printing (heartbeat, search/thinking indicators) with rich, to avoid terminal output races between threads
-# [ ] Fix general bugginess in the text interface
-# [x] Experiment (new branch): minimalist voice UI — single-line overwriting status,
-#     spinner + "Thinking..." during LLM wait, elapsed time on completion; --text flag
-#     for text mode; no standby; Ctrl+C to exit (in progress on Friday-ver-3)
+# [ ] Text interface — needs further testing across modes and WSL2/Ubuntu before closing
+# [ ] Search heuristic over-triggering on non-time-sensitive queries (e.g. "origin of your name")
+# [x] Piper: remove dead synthesize_stream_raw code path now that audio_int16_bytes is confirmed
+# [ ] Update CHANGELOG for all v1.2 work on version-3 branch
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -853,25 +846,17 @@ def tts_piper(text):
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(sample_rate)
-            try:
-                # Cleanest API: yields raw PCM bytes directly, no AudioChunk wrapping
-                for raw_bytes in voice.synthesize_stream_raw(text):
-                    wf.writeframes(raw_bytes)
-                dev_log("Piper: used synthesize_stream_raw")
-            except AttributeError:
-                # Older API: synthesize(text) yields AudioChunk objects
-                dev_log("Piper: synthesize_stream_raw not available, trying synthesize generator")
-                for chunk in voice.synthesize(text):
-                    raw = None
-                    for attr in ('audio_int16_bytes', 'audio', 'audio_bytes', 'data', 'samples'):
-                        val = getattr(chunk, attr, None)
-                        if val is not None:
-                            raw = val.tobytes() if hasattr(val, 'tobytes') else bytes(val)
-                            break
-                    if raw is None:
-                        dev_log(f"Unknown chunk format — type: {type(chunk).__name__}, attrs: {[a for a in dir(chunk) if not a.startswith('_')]}")
-                        return tts_local(text)
-                    wf.writeframes(raw)
+            for chunk in voice.synthesize(text):
+                raw = None
+                for attr in ('audio_int16_bytes', 'audio', 'audio_bytes', 'data', 'samples'):
+                    val = getattr(chunk, attr, None)
+                    if val is not None:
+                        raw = val.tobytes() if hasattr(val, 'tobytes') else bytes(val)
+                        break
+                if raw is None:
+                    dev_log(f"Unknown chunk format — type: {type(chunk).__name__}, attrs: {[a for a in dir(chunk) if not a.startswith('_')]}")
+                    return tts_local(text)
+                wf.writeframes(raw)
 
         audio_bytes = wav_buffer.getvalue()
         dev_log(f"TTS: Piper ({PIPER_VOICE}, {len(audio_bytes)} bytes)")
