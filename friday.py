@@ -30,7 +30,6 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Experiment (new branch): minimalist voice UI — single-line overwriting status,
 #     spinner + "Thinking..." during LLM wait, elapsed time on completion; --text flag
 #     for text mode; no standby; Ctrl+C to exit (in progress on Friday-ver-3)
-# [ ] Make sure text mode displays last query and response for each turn
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -855,10 +854,13 @@ def tts_piper(text):
             wf.setsampwidth(2)
             wf.setframerate(sample_rate)
             try:
-                # Some piper builds: synthesize(text, wav_file) writes frames directly
-                voice.synthesize(text, wf)
-            except TypeError:
-                # piper-tts pip package: synthesize(text) yields chunks
+                # Cleanest API: yields raw PCM bytes directly, no AudioChunk wrapping
+                for raw_bytes in voice.synthesize_stream_raw(text):
+                    wf.writeframes(raw_bytes)
+                dev_log("Piper: used synthesize_stream_raw")
+            except AttributeError:
+                # Older API: synthesize(text) yields AudioChunk objects
+                dev_log("Piper: synthesize_stream_raw not available, trying synthesize generator")
                 for chunk in voice.synthesize(text):
                     raw = None
                     for attr in ('audio', 'audio_bytes', 'data', 'samples'):
@@ -867,7 +869,7 @@ def tts_piper(text):
                             raw = val.tobytes() if hasattr(val, 'tobytes') else bytes(val)
                             break
                     if raw is None:
-                        dev_log(f"Unknown AudioChunk format — attrs: {[a for a in dir(chunk) if not a.startswith('_')]}")
+                        dev_log(f"Unknown chunk format — type: {type(chunk).__name__}, attrs: {[a for a in dir(chunk) if not a.startswith('_')]}")
                         return tts_local(text)
                     wf.writeframes(raw)
 
