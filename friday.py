@@ -863,7 +863,7 @@ def tts_piper(text):
                 dev_log("Piper: synthesize_stream_raw not available, trying synthesize generator")
                 for chunk in voice.synthesize(text):
                     raw = None
-                    for attr in ('audio', 'audio_bytes', 'data', 'samples'):
+                    for attr in ('audio_int16_bytes', 'audio', 'audio_bytes', 'data', 'samples'):
                         val = getattr(chunk, attr, None)
                         if val is not None:
                             raw = val.tobytes() if hasattr(val, 'tobytes') else bytes(val)
