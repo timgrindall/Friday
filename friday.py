@@ -1273,7 +1273,7 @@ class Friday:
             if not DEV_MODE:
                 _clear_screen()
             print(f"\n  Friday: {response_text}")
-            print(f"\n  {C.GREEN}✓ {elapsed:.1f}s{C.RESET}\n")
+            print(f"\n  {C.GREEN}✓ {elapsed:.1f}s{C.RESET}")
 
     # ── Main Loop ─────────────────────────────────────────────────
 
