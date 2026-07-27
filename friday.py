@@ -983,11 +983,13 @@ class Friday:
             self.playback_done.set()
             return
 
-        def _set_recording_status():
-            if self.recording:
-                status.set("● Recording...")
+        status.set("● Recording...")
 
-        self._speak_now_timer = threading.Timer(self.RECORDING_WARMUP_SECONDS, _set_recording_status)
+        def _set_speak_now():
+            if self.recording:
+                status.set("🎤 Speak now...")
+
+        self._speak_now_timer = threading.Timer(self.RECORDING_WARMUP_SECONDS, _set_speak_now)
         self._speak_now_timer.daemon = True
         self._speak_now_timer.start()
 
@@ -1318,6 +1320,8 @@ class Friday:
 # ── Entry Point ───────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    status.set("Starting...", spinner=True)
+
     # First-run check — nudge user to run setup if .env is missing
     if not os.path.exists(".env"):
         print(f"\n{C.YELLOW}  ! No .env file found.{C.RESET}")
