@@ -24,6 +24,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Piper: remove dead synthesize_stream_raw code path now that audio_int16_bytes is confirmed
 # [ ] Update CHANGELOG for all v1.2 work on version-3 branch
 # [ ] Ctrl+C on Ubuntu/WSL2 prints goodbye but requires a second Ctrl+C to actually exit
+# [ ] Experiment with Gemma 4 tool use for search decisions — model decides when to search instead of keyword heuristics (gate behind --model gemma4 to avoid double roundtrip on Mistral)
 # ─────────────────────────────────────────────────────────────────
 
 import os
