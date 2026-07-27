@@ -23,6 +23,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [ ] Search heuristic over-triggering on non-time-sensitive queries (e.g. "origin of your name")
 # [x] Piper: remove dead synthesize_stream_raw code path now that audio_int16_bytes is confirmed
 # [ ] Update CHANGELOG for all v1.2 work on version-3 branch
+# [ ] Ctrl+C on Ubuntu/WSL2 prints goodbye but requires a second Ctrl+C to actually exit
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -1074,16 +1075,14 @@ class Friday:
                 pass
 
     def do_voice_session(self):
-        if sys.platform == 'win32':
-            self._voice_pynput()
-        else:
-            self._voice_enter()
+        self._voice_pynput()
 
     def _voice_pynput(self):
-        import msvcrt
-        while msvcrt.kbhit():
-            msvcrt.getwch()
-        time.sleep(0.1)
+        if sys.platform == 'win32':
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+            time.sleep(0.1)
         self._suppress_echo()
 
         space_released = threading.Event()
