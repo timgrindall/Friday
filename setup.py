@@ -159,7 +159,80 @@ def configure_env():
         success("No API keys configured — Friday will run fully locally.")
 
 
-def done():
+def download_piper_model():
+    header("Piper Voice Model")
+
+    # Check piper-tts is actually installed
+    try:
+        import piper
+    except ImportError:
+        warn("piper-tts doesn't appear to be installed — skipping model download.")
+        warn("Run 'pip install piper-tts' and re-run setup if you want local TTS.")
+        return
+
+    # Read PIPER_VOICE from .env if present, else use default
+    piper_voice = "en_US-lessac-medium"
+    if os.path.exists(".env"):
+        with open(".env") as f:
+            for line in f:
+                if line.startswith("PIPER_VOICE="):
+                    piper_voice = line.strip().split("=", 1)[1]
+                    break
+
+    # Platform-appropriate model directory
+    if sys.platform == 'win32':
+        voice_dir = os.path.join(os.path.expanduser("~"), "piper", "voices")
+    else:
+        voice_dir = os.path.expanduser("~/.local/share/piper/voices")
+
+    model_path  = os.path.join(voice_dir, f"{piper_voice}.onnx")
+    config_path = model_path + ".json"
+
+    if os.path.exists(model_path) and os.path.exists(config_path):
+        success(f"Piper model already downloaded ({piper_voice}).")
+        return
+
+    step(f"Downloading Piper voice model: {piper_voice}")
+    print(f"  {C.CYAN}This is a one-time download (~50-100 MB).{C.RESET}\n")
+
+    if not confirm("Download now?"):
+        warn("Skipping — Friday will fall back to pyttsx3 for local TTS.")
+        return
+
+    # Build Hugging Face URL
+    def model_url(filename):
+        parts = piper_voice.split("-")
+        if len(parts) < 3:
+            return None
+        region, name, quality = parts[0], parts[1], parts[2]
+        lang = region.split("_")[0]
+        base = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang}/{region}/{name}/{quality}"
+        return f"{base}/{filename}"
+
+    import urllib.request
+    os.makedirs(voice_dir, exist_ok=True)
+
+    for filename in [f"{piper_voice}.onnx", f"{piper_voice}.onnx.json"]:
+        dest = os.path.join(voice_dir, filename)
+        if os.path.exists(dest):
+            continue
+        url = model_url(filename)
+        if not url:
+            warn(f"Couldn't build download URL for {piper_voice}. Check PIPER_VOICE in your .env.")
+            return
+        print(f"  Downloading {filename}...", end="", flush=True)
+        try:
+            urllib.request.urlretrieve(url, dest)
+            print(f" {C.GREEN}done{C.RESET}")
+        except Exception as e:
+            print(f" {C.YELLOW}failed{C.RESET}")
+            warn(f"Error: {e}")
+            return
+
+    success(f"Piper model ready ({piper_voice}).")
+
+
+
     header("Setup Complete")
     print(f"""
   Friday is ready. Start it with:
@@ -197,6 +270,7 @@ if __name__ == "__main__":
         check_ollama()
         install_dependencies()
         configure_env()
+        download_piper_model()
         done()
     except KeyboardInterrupt:
         print(f"\n\n  {C.YELLOW}Setup cancelled.{C.RESET}")
