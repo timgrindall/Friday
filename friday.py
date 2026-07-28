@@ -24,6 +24,8 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Piper: remove dead synthesize_stream_raw code path now that audio_int16_bytes is confirmed
 # [ ] Update CHANGELOG for all v1.2 work on version-3 branch
 # [ ] Ctrl+C on Ubuntu/WSL2 prints goodbye but requires a second Ctrl+C to actually exit
+# [ ] Research better terminal input handling on Ubuntu/WSL2 — current Linux toggle mode (SPACE start, SPACE stop) works but hold-to-talk via stdin key repeat is unreliable; investigate readchar, blessed, or raw ioctl approaches
+# [ ] ~60s blank terminal on Ubuntu before "Starting..." due to import whisper cold-start pulling PyTorch — fix with a bare print() before all imports using only builtins
 # [ ] Experiment with Gemma 4 tool use for search decisions — model decides when to search instead of keyword heuristics (gate behind --model gemma4 to avoid double roundtrip on Mistral)
 # ─────────────────────────────────────────────────────────────────
 
@@ -177,7 +179,7 @@ class StatusLine:
     def finish(self, elapsed):
         """Show '✓  X.Xs' for 3 s then reset to 'Ready to listen...'."""
         self.set(f"✓  {elapsed:.1f}s")
-        t = threading.Timer(3.0, lambda: self.set("Ready to listen..."))
+        t = threading.Timer(3.0, lambda: self.set(READY_MSG))
         t.daemon = True
         t.start()
 
@@ -238,6 +240,8 @@ DEV_MODE  = "--dev"       in sys.argv  # Verbose debug logging
 TEXT_MODE = "--text"      in sys.argv  # Text input mode with streaming responses
 LOCAL_TTS = "--local-tts" in sys.argv  # Skip ElevenLabs, force local TTS
 NO_SEARCH = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
+
+READY_MSG = "Press SPACE to start · SPACE to stop" if sys.platform != 'win32' else READY_MSG
 
 def _get_flag_value(flag, default):
     """Return the value following a flag (e.g. --model mistral), or default if not passed."""
@@ -980,7 +984,7 @@ class Friday:
             for i, d in enumerate(sd.query_devices()):
                 if d['max_input_channels'] > 0:
                     dev_log(f"  [{i}] {d['name']} ({d['max_input_channels']}ch)")
-            status.set("Ready to listen...")
+            status.set(READY_MSG)
             self.playback_done.set()
             return
 
@@ -1006,7 +1010,7 @@ class Friday:
 
             if not self.audio_frames:
                 dev_log(f"0 frames captured — hold shorter than {self.RECORDING_WARMUP_SECONDS}s warmup")
-                status.set("Ready to listen...")
+                status.set(READY_MSG)
                 return None
 
             audio_data = np.concatenate(self.audio_frames, axis=0)
@@ -1015,7 +1019,7 @@ class Friday:
 
             if duration_s < MIN_RECORDING_SECONDS:
                 dev_log(f"Too short ({duration_s:.2f}s < {MIN_RECORDING_SECONDS}s) — discarded")
-                status.set("Ready to listen...")
+                status.set(READY_MSG)
                 return None
 
             # Prepend 1s of silence so Whisper doesn't mishear the first words
@@ -1078,7 +1082,64 @@ class Friday:
                 pass
 
     def do_voice_session(self):
-        self._voice_pynput()
+        if sys.platform == 'win32':
+            self._voice_pynput()
+        else:
+            self._voice_linux()
+
+    def _voice_linux(self):
+        """
+        Linux toggle mode: SPACE to start recording, SPACE again to stop.
+        Uses cbreak stdin reads — no pynput required, works in WSL2/Ubuntu.
+        """
+        import select
+        self._suppress_echo()
+
+        # Wait for SPACE to start (or ESC to cancel)
+        while self.running:
+            r, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if not r:
+                continue
+            ch = sys.stdin.read(1)
+            if ch == ' ':
+                self.start_recording()
+                break
+            elif ch == '\x1b':
+                self._restore_echo()
+                status.set(READY_MSG)
+                self.playback_done.set()
+                return
+
+        if not self.running:
+            self._restore_echo()
+            return
+
+        # Wait for SPACE to stop (or ESC to cancel)
+        while self.running:
+            r, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if not r:
+                continue
+            ch = sys.stdin.read(1)
+            if ch == ' ':
+                break
+            elif ch == '\x1b':
+                self._cancel_recording()
+                self._restore_echo()
+                status.set(READY_MSG)
+                self.playback_done.set()
+                return
+
+        self._restore_echo()
+
+        if not self.running:
+            self._cancel_recording()
+            return
+
+        wav_file = self.stop_recording()
+        if wav_file:
+            threading.Thread(target=self._handle_voice, args=(wav_file,), daemon=True).start()
+        else:
+            self.playback_done.set()
 
     def _voice_pynput(self):
         if sys.platform == 'win32':
@@ -1090,30 +1151,45 @@ class Friday:
 
         space_released = threading.Event()
         cancelled = threading.Event()
+        _release_timer = [None]
 
         def on_press(key):
             if key == keyboard.Key.space:
+                # Cancel any pending phantom-release timer (X11 auto-repeat)
+                if _release_timer[0]:
+                    _release_timer[0].cancel()
+                    _release_timer[0] = None
                 if not self.recording and is_console_focused():
                     self.start_recording()
             elif key == keyboard.Key.esc:
                 cancelled.set()
                 space_released.set()
-                return False
 
         def on_release(key):
             if key == keyboard.Key.space:
-                space_released.set()
-                return False
+                # Debounce: wait 80ms before treating as a real release.
+                # X11 auto-repeat phantom releases are followed by a new on_press
+                # within ~30ms; a real release has no follow-up press.
+                def _confirm_release():
+                    space_released.set()
+                t = threading.Timer(0.08, _confirm_release)
+                t.daemon = True
+                t.start()
+                _release_timer[0] = t
 
         with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-            space_released.wait()
+            while not space_released.is_set():
+                if not self.running:
+                    cancelled.set()
+                    break
+                space_released.wait(timeout=0.1)
             listener.stop()
 
         self._restore_echo()
 
         if cancelled.is_set():
             self._cancel_recording()
-            status.set("Ready to listen...")
+            status.set(READY_MSG)
             self.playback_done.set()
             return
 
@@ -1149,11 +1225,11 @@ class Friday:
                 self._play_audio(audio_bytes, t_start)
             else:
                 dev_log("No audio generated")
-                status.set("Ready to listen...")
+                status.set(READY_MSG)
                 self.playback_done.set()
         except Exception as e:
             dev_log(f"Voice processing error: {e}")
-            status.set("Ready to listen...")
+            status.set(READY_MSG)
             self.playback_done.set()
 
     def _play_audio(self, audio_bytes, t_start=None):
@@ -1174,10 +1250,10 @@ class Friday:
             if t_start:
                 status.finish(time.time() - t_start)
             else:
-                status.set("Ready to listen...")
+                status.set(READY_MSG)
         except Exception as e:
             dev_log(f"Playback failed: {e}")
-            status.set("Ready to listen...")
+            status.set(READY_MSG)
         finally:
             self.playback_done.set()
 
@@ -1356,7 +1432,7 @@ if __name__ == "__main__":
 
     # Banner → 3 s → clear → Ready
     _show_banner()
-    status.set("Ready..." if TEXT_MODE else "Ready to listen...")
+    status.set("Ready..." if TEXT_MODE else READY_MSG)
 
     friday = Friday()
     try:
