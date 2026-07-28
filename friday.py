@@ -25,7 +25,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [ ] Update CHANGELOG for all v1.2 work on version-3 branch
 # [X] Ctrl+C on Ubuntu/WSL2 prints goodbye but requires a second Ctrl+C to actually exit
 # [ ] Research better terminal input handling on Ubuntu/WSL2 — current Linux toggle mode (SPACE start, SPACE stop) works but hold-to-talk via stdin key repeat is unreliable; investigate readchar, blessed, or raw ioctl approaches
-# [ ] ~60s blank terminal on Ubuntu before "Starting..." due to import whisper cold-start pulling PyTorch — fix with a bare print() before all imports using only builtins
+# [X] ~60s blank terminal on Ubuntu before "Starting..." due to import whisper cold-start pulling PyTorch — fix with a bare print() before all imports using only builtins
 # [ ] Experiment with Gemma 4 tool use for search decisions — model decides when to search instead of keyword heuristics (gate behind --model gemma4 to avoid double roundtrip on Mistral)
 # [ ] Update model referenced in readme and setup script to be the same (prefer Gemma 4 E4B)
 # ─────────────────────────────────────────────────────────────────
