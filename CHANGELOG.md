@@ -2,7 +2,36 @@
 
 ---
 
-## v1.2 (branch: version-3)
+## v1.3 (branch: version-3)
+Ubuntu/WSL2 compatibility and startup improvements.
+
+**Linux voice mode**
+- Replaced pynput hold-to-talk on Linux with a stdin toggle mode (`_voice_linux`) — SPACE to start recording, SPACE again to stop; works reliably in WSL2 without X server
+- `READY_MSG` constant is now platform-aware: Linux shows "Press SPACE to start · SPACE to stop", Windows shows "Ready to listen..."
+- `● Recording...` status now appears immediately on SPACE press; `🎤 Speak now...` appears after the 1.25s warmup window
+- Added 80ms debounce to `_voice_pynput` `on_release` to handle X11 phantom auto-repeat releases on Linux
+
+**Ctrl+C exit**
+- All exit handlers now use `os._exit(0)` instead of `sys.exit(0)` — avoids hanging on daemon thread cleanup
+- `_restore_echo()` called explicitly before exit so terminal is never left in cbreak mode
+- `\r\033[K` prefix on Goodbye message erases the `^C` echo character from the terminal
+- `space_released.wait()` replaced with a 100ms timeout loop that checks `self.running` — listener unblocks cleanly on shutdown
+
+**Startup**
+- `print("  Friday is loading...", flush=True)` added before all imports — gives immediate feedback during the 20-60s PyTorch cold-start on Ubuntu
+- `status.set("Starting...", spinner=True)` now fires as the first line of `__main__`
+- Fixed `NameError` on `READY_MSG` when running on Windows
+
+**Text mode**
+- Removed trailing `\n` from the `✓ Xs` done line — eliminates double blank line before the `>` prompt
+
+**Setup and docs**
+- `setup.py` now downloads the Piper voice model as part of setup (prompted, one-time, reads `PIPER_VOICE` from `.env` if set)
+- README rewritten — cut from 310 lines to 52; configuration details deferred to `setup.py`
+
+---
+
+
 Complete UI overhaul — minimalist single-line status interface.
 
 **StatusLine**

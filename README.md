@@ -50,3 +50,11 @@ Hold **SPACE** to record, release to send. On Linux, press **SPACE** to start re
 
 Audio and queries never leave your machine unless you've configured ElevenLabs (sends response text for TTS) or SerpAPI (sends search queries). Conversation history is stored locally in `friday_memory.json`.
 
+---
+
+## Author Notes
+
+This entire project was created using Claude.ai by Anthropic and started as a hypothetical conversation that became real. The amazing thing about Friday is that **no personal data is shared across the internet** when using the local TTS fallback — it all runs on your machine.
+
+Friday uses a small language model intentionally, so it may feel limited at times, but it's incredible software for privacy-conscious users who want a local AI assistant without cloud dependencies or subscriptions.
+
