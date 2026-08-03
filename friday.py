@@ -242,7 +242,7 @@ TEXT_MODE = "--text"      in sys.argv  # Text input mode with streaming response
 LOCAL_TTS = "--local-tts" in sys.argv  # Skip ElevenLabs, force local TTS
 NO_SEARCH = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 
-READY_MSG = "Press SPACE to start · SPACE to stop" if sys.platform != 'win32' else READY_MSG
+READY_MSG = "Press SPACE to start · SPACE to stop" if sys.platform != 'win32' else "Ready to listen..."
 
 def _get_flag_value(flag, default):
     """Return the value following a flag (e.g. --model mistral), or default if not passed."""
