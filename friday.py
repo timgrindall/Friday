@@ -24,7 +24,7 @@ In text mode, press ESC while a response is streaming to cut it off early.
 # [x] Piper: remove dead synthesize_stream_raw code path now that audio_int16_bytes is confirmed
 # [ ] Update CHANGELOG for all v1.2 work on version-3 branch
 # [X] Ctrl+C on Ubuntu/WSL2 prints goodbye but requires a second Ctrl+C to actually exit
-# [ ] Research better terminal input handling on Ubuntu/WSL2 — current Linux toggle mode (SPACE start, SPACE stop) works but hold-to-talk via stdin key repeat is unreliable; investigate readchar, blessed, or raw ioctl approaches
+# [x] Linux hold-to-talk via stdin auto-repeat heuristic (terminals send no key-up) — needs real-world testing on native Linux, WSL2 and Windows
 # [X] ~60s blank terminal on Ubuntu before "Starting..." due to import whisper cold-start pulling PyTorch — fix with a bare print() before all imports using only builtins
 # [ ] Experiment with Gemma 4 tool use for search decisions — model decides when to search instead of keyword heuristics (gate behind --model gemma4 to avoid double roundtrip on Mistral)
 # [ ] Update model referenced in readme and setup script to be the same (prefer Gemma 4 E4B)
@@ -38,6 +38,7 @@ import time
 import wave
 import tempfile
 import threading
+import atexit
 import io
 import warnings
 import logging
@@ -50,7 +51,6 @@ import numpy as np
 import sounddevice as sd
 import whisper
 import requests
-from pynput import keyboard
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -242,7 +242,7 @@ TEXT_MODE = "--text"      in sys.argv  # Text input mode with streaming response
 LOCAL_TTS = "--local-tts" in sys.argv  # Skip ElevenLabs, force local TTS
 NO_SEARCH = "--no-search" in sys.argv  # Disable web search even if SerpAPI key is set
 
-READY_MSG = "Press SPACE to start · SPACE to stop" if sys.platform != 'win32' else "Ready to listen..."
+READY_MSG = "Hold SPACE to record" if sys.platform != 'win32' else "Ready to listen..."
 
 def _get_flag_value(flag, default):
     """Return the value following a flag (e.g. --model mistral), or default if not passed."""
@@ -353,6 +353,16 @@ conversation_history = load_history()
 
 # Whisper is loaded in __main__ so we can show a spinner during startup
 whisper_model = None
+
+
+def _whisper_model_cached(name):
+    """True if Whisper's weights for `name` are already in its download cache."""
+    cache = os.path.join(os.getenv("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")), "whisper")
+    try:
+        filename = os.path.basename(whisper._MODELS[name])
+    except (AttributeError, KeyError):
+        return True  # can't tell — assume cached, keep the existing spinner behavior
+    return os.path.exists(os.path.join(cache, filename))
 
 
 def check_ollama():
@@ -481,7 +491,7 @@ def web_search(query):
 _TIME_ANCHORS = {
     "today", "right now", "currently", "at the moment", "latest", "recent",
     "recently", "just announced", "this week", "this month", "this year",
-    "tomorrow", "yesterday", "still", "anymore", "now",
+    "tomorrow", "yesterday", "still", "anymore", "now", "next", "new", "newest"
 }
 
 _QUESTION_WORDS = {
@@ -786,15 +796,24 @@ def _ensure_piper_model():
             status.clear()
             return
         dev_log(f"Downloading {url}")
+        # Write to a .part file and rename on success, so an interrupted download
+        # can never be mistaken for a complete model on the next run.
+        part = dest + ".part"
         try:
             r = requests.get(url, stream=True, timeout=300)
             r.raise_for_status()
-            with open(dest, "wb") as f:
+            with open(part, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
+            os.replace(part, dest)
         except Exception as e:
             dev_log(f"Piper download failed ({filename}): {e}")
+            try:
+                os.remove(part)
+            except OSError:
+                pass
             status.clear()
+            print(f"  {C.YELLOW}! Couldn't download Piper voice ({filename}) — will retry next launch.{C.RESET}")
             return
     status.clear()
     dev_log("Piper model ready")
@@ -945,6 +964,32 @@ def process_text(user_query):
 
 # ── Client Interface ──────────────────────────────────────────────
 
+# ── Terminal Input (Linux) ────────────────────────────────────────
+
+def _poll_stdin(timeout):
+    """Return the bytes waiting on stdin, or b'' after `timeout` seconds.
+    Reads the raw fd so select() and read agree — sys.stdin.read() would hide
+    already-buffered bytes from select()."""
+    import select
+    fd = sys.stdin.fileno()
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        return b''
+    try:
+        return os.read(fd, 64)
+    except OSError:
+        return b''
+
+
+def _has_bare_esc(data):
+    """True if `data` holds a real ESC keypress, not the lead byte of an
+    arrow/function-key sequence (ESC [ ... or ESC O ...)."""
+    for i, b in enumerate(data):
+        if b == 0x1b and (i + 1 >= len(data) or data[i + 1] not in b'[O'):
+            return True
+    return False
+
+
 class Friday:
     def __init__(self):
         self.recording  = False
@@ -957,6 +1002,11 @@ class Friday:
         self.INPUT_FILE  = AUDIO_INPUT
         self.OUTPUT_FILE = AUDIO_OUTPUT
         self.RECORDING_WARMUP_SECONDS = 1.25
+        # Linux hold-to-talk: release is inferred from auto-repeat gaps on stdin.
+        # Before the first repeat arrives we must outwait the OS initial repeat delay
+        # (typically 250-660ms); once repeats are flowing (~30Hz) a short gap means release.
+        self.HOLD_INITIAL_GAP = 0.85
+        self.HOLD_REPEAT_GAP  = 0.20
 
     # ── Voice ─────────────────────────────────────────────────────
 
@@ -1050,6 +1100,8 @@ class Friday:
             self._old_console_mode = mode.value
             kernel32.SetConsoleMode(handle, mode.value & ~0x0006)
         else:
+            if getattr(self, '_old_termios', None):
+                return  # already in cbreak — keep the original saved settings
             try:
                 import termios, tty
                 self._old_termios = termios.tcgetattr(sys.stdin)
@@ -1068,8 +1120,9 @@ class Friday:
         else:
             try:
                 import termios
-                if hasattr(self, '_old_termios') and self._old_termios:
+                if getattr(self, '_old_termios', None):
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_termios)
+                    self._old_termios = None
             except Exception:
                 pass
 
@@ -1090,50 +1143,49 @@ class Friday:
 
     def _voice_linux(self):
         """
-        Linux toggle mode: SPACE to start recording, SPACE again to stop.
-        Uses cbreak stdin reads — no pynput required, works in WSL2/Ubuntu.
+        Linux hold-to-talk: hold SPACE to record, release to send. ESC cancels.
+
+        Terminals report key presses but never releases, so release is inferred from
+        the OS auto-repeat stream on stdin: SPACE bytes keep arriving while the key is
+        held and stop when it is let go. Works in any terminal, including WSL2/SSH/Wayland.
+        The terminal stays in cbreak (no echo) between sessions so stray keys don't print.
         """
-        import select
         self._suppress_echo()
+        self._drain_stdin()  # drop keys typed during processing/playback
 
-        # Wait for SPACE to start (or ESC to cancel)
+        # Wait for SPACE down
         while self.running:
-            r, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if not r:
-                continue
-            ch = sys.stdin.read(1)
-            if ch == ' ':
-                self.start_recording()
+            if b' ' in _poll_stdin(0.1):
                 break
-            elif ch == '\x1b':
-                self._restore_echo()
-                status.set(READY_MSG)
-                self.playback_done.set()
-                return
-
         if not self.running:
-            self._restore_echo()
             return
 
-        # Wait for SPACE to stop (or ESC to cancel)
+        self.start_recording()
+        if not self.recording:  # audio device error — start_recording already reset the UI
+            return
+
+        last_seen = time.time()
+        repeating = False
+        cancelled = False
         while self.running:
-            r, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if not r:
-                continue
-            ch = sys.stdin.read(1)
-            if ch == ' ':
+            data = _poll_stdin(0.05)
+            now = time.time()
+            if _has_bare_esc(data):
+                cancelled = True
                 break
-            elif ch == '\x1b':
-                self._cancel_recording()
-                self._restore_echo()
+            if b' ' in data:
+                repeating = True
+                last_seen = now
+            elif now - last_seen > (self.HOLD_REPEAT_GAP if repeating else self.HOLD_INITIAL_GAP):
+                break  # SPACE released
+
+        self._drain_stdin()
+
+        if cancelled or not self.running:
+            self._cancel_recording()
+            if cancelled:
                 status.set(READY_MSG)
                 self.playback_done.set()
-                return
-
-        self._restore_echo()
-
-        if not self.running:
-            self._cancel_recording()
             return
 
         wav_file = self.stop_recording()
@@ -1143,6 +1195,7 @@ class Friday:
             self.playback_done.set()
 
     def _voice_pynput(self):
+        from pynput import keyboard  # lazy: only Windows needs it; import fails without a display
         if sys.platform == 'win32':
             import msvcrt
             while msvcrt.kbhit():
@@ -1201,21 +1254,14 @@ class Friday:
             self.playback_done.set()
 
     def _drain_stdin(self):
-        """Flush any buffered input before the next prompt."""
-        import termios
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-
-    def _voice_enter(self):
-        input()
-        self._drain_stdin()
-        self.start_recording()
-        input()
-        self._drain_stdin()
-        wav_file = self.stop_recording()
-        if wav_file:
-            threading.Thread(target=self._handle_voice, args=(wav_file,), daemon=True).start()
-        else:
-            self.playback_done.set()
+        """Flush any buffered keystrokes (Linux) so they don't leak into the next read."""
+        if sys.platform == 'win32':
+            return
+        try:
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
 
     def _handle_voice(self, wav_file):
         """Call process_voice() directly and play the result."""
@@ -1298,18 +1344,17 @@ class Friday:
                                 stop_event.set()
                                 return
                 else:
-                    from pynput import keyboard as kb
-                    def on_press(key):
-                        if key == kb.Key.esc:
+                    while not stream_done.is_set():
+                        if _has_bare_esc(_poll_stdin(0.05)):
                             stop_event.set()
-                            return False
-                    with kb.Listener(on_press=on_press) as listener:
-                        stream_done.wait()
-                        listener.stop()
+                            return
             except (EOFError, KeyboardInterrupt):
                 stop_event.set()
 
-        threading.Thread(target=watch_for_esc, daemon=True).start()
+        if sys.platform != 'win32':
+            self._suppress_echo()  # cbreak so ESC arrives without Enter, and typing doesn't echo into the stream
+        watcher = threading.Thread(target=watch_for_esc, daemon=True)
+        watcher.start()
 
         t_start = time.time()
         stopped_early = False
@@ -1345,6 +1390,9 @@ class Friday:
             dev_log(f"Stream error: {e}")
         finally:
             stream_done.set()
+            watcher.join(timeout=1.0)  # make sure it has stopped reading stdin before input() runs
+            if sys.platform != 'win32':
+                self._restore_echo()
 
         if not stopped_early and full_response:
             response_text = "".join(full_response)
@@ -1353,6 +1401,8 @@ class Friday:
                 _clear_screen()
             print(f"\n  Friday: {response_text}")
             print(f"\n  {C.GREEN}✓ {elapsed:.1f}s{C.RESET}")
+
+        self._drain_stdin()  # discard keys typed while streaming
 
     # ── Main Loop ─────────────────────────────────────────────────
 
@@ -1391,6 +1441,7 @@ class Friday:
             os._exit(0)
 
     def run(self):
+        atexit.register(self._restore_echo)  # never leave the terminal in cbreak
         if TEXT_MODE:
             self._run_text()
         else:
@@ -1420,8 +1471,12 @@ if __name__ == "__main__":
         print(f"  Make sure it's running with: ollama serve\n")
         sys.exit(1)
 
-    # Load Whisper with spinner
-    status.set("Loading Whisper...", spinner=True)
+    # Load Whisper. On first run it downloads the model with its own tqdm progress
+    # bar, so keep the spinner off to avoid both fighting over the same line.
+    if _whisper_model_cached("base"):
+        status.set("Loading Whisper...", spinner=True)
+    else:
+        print("  Downloading Whisper model (one-time)...", flush=True)
     whisper_model = whisper.load_model("base")
     status.clear()
     dev_log("Whisper ready")

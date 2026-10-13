@@ -32,7 +32,9 @@ The setup script installs dependencies and optionally configures API keys for El
 python friday.py
 ```
 
-Hold **SPACE** to record, release to send. On Linux, press **SPACE** to start recording, **SPACE** again to stop. Press **Ctrl+C** to exit.
+Hold **SPACE** to record, release to send. Press **ESC** while holding to cancel. Press **Ctrl+C** to exit.
+
+On Linux, key release is inferred from OS key auto-repeat, so recording stops a fraction of a second after you let go. This needs key repeat enabled (it is by default).
 
 ### Flags
 

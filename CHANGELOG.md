@@ -2,6 +2,24 @@
 
 ---
 
+## Unreleased (branch: version-3)
+Linux input pipeline rework.
+
+**Linux voice mode**
+- Hold-to-talk restored on Linux: hold SPACE to record, release to send, ESC to cancel. Release is inferred from OS auto-repeat on stdin (`HOLD_INITIAL_GAP` / `HOLD_REPEAT_GAP`), so it works in any terminal, WSL2 and Wayland. Replaces the SPACE/SPACE toggle
+- 1.25s warmup and the `● Recording...` → `🎤 Speak now...` messages are unchanged
+- `READY_MSG` on Linux is now "Hold SPACE to record"
+
+**Input handling**
+- Stdin is read via `os.read` on the raw fd (`_poll_stdin`) — fixes keypresses hidden from `select()` by Python's buffered `sys.stdin.read()`
+- Arrow/function-key escape sequences no longer count as ESC (`_has_bare_esc`)
+- Terminal stays in cbreak for the whole voice session and is restored via exit handlers and `atexit`; stray keys are flushed before each recording and prompt
+- `pynput` import is now lazy and Windows-only — Linux no longer fails to start without a `DISPLAY`
+- Text-mode ESC-to-stop on Linux reads stdin instead of a global pynput hook (no longer fires from other windows, works on Wayland)
+- Removed dead `_voice_enter`
+
+---
+
 ## v1.3 (branch: version-3)
 Ubuntu/WSL2 compatibility and startup improvements.
 

@@ -1,5 +1,6 @@
 old/
 .env
+.venv
 
 friday_memory.json
 
